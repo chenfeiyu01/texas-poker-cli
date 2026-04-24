@@ -5,6 +5,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.isPortOpen = isPortOpen;
 exports.startLocalServer = startLocalServer;
+exports.findAvailablePort = findAvailablePort;
 const child_process_1 = require("child_process");
 const net_1 = __importDefault(require("net"));
 const path_1 = __importDefault(require("path"));
@@ -32,4 +33,26 @@ async function startLocalServer(port) {
         }
     }
     throw new Error('服务器启动超时');
+}
+function findAvailablePort() {
+    return new Promise((resolve, reject) => {
+        const server = net_1.default.createServer();
+        server.unref();
+        server.on('error', reject);
+        server.listen(0, '127.0.0.1', () => {
+            const address = server.address();
+            if (!address || typeof address === 'string') {
+                server.close(() => reject(new Error('无法分配本地端口')));
+                return;
+            }
+            const { port } = address;
+            server.close((error) => {
+                if (error) {
+                    reject(error);
+                    return;
+                }
+                resolve(port);
+            });
+        });
+    });
 }

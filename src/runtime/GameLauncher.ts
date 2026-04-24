@@ -4,7 +4,7 @@ import { PokerClient } from '../network/Client';
 import { CliRenderer } from '../ui/cli/renderer';
 import { LobbyRenderer, GameLaunchConfig } from '../ui/lobby/renderer';
 import { SlackerRenderer } from '../ui/slacker/renderer';
-import { isPortOpen, startLocalServer } from './serverBootstrap';
+import { findAvailablePort, isPortOpen, startLocalServer } from './serverBootstrap';
 
 export class GameLauncher {
   private bots: AiPlayer[] = [];
@@ -22,6 +22,7 @@ export class GameLauncher {
 
   async launch(config: GameLaunchConfig): Promise<void> {
     if (config.mode === 'local') {
+      config.host = await this.allocateLocalHost();
       await this.ensureLocalServer(config.host);
     }
 
@@ -45,6 +46,11 @@ export class GameLauncher {
     if (config.mode !== 'online-join') {
       void this.prepareRoom(config, client);
     }
+  }
+
+  private async allocateLocalHost(): Promise<string> {
+    const port = await findAvailablePort();
+    return `http://localhost:${port}`;
   }
 
   private async ensureLocalServer(host: string): Promise<void> {

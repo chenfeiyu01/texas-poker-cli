@@ -3,21 +3,30 @@ import { GameState } from '../../core/Game';
 import { PokerClient } from '../../network/Client';
 import type { GmPlayerProfile, PublicPlayerProfile } from '../../session/types';
 
+interface ActionOption {
+  label: string;
+  hint: string;
+  run: () => void;
+}
+
 export class CliRenderer {
   private screen: blessed.Widgets.Screen;
   private tableBox: blessed.Widgets.BoxElement;
   private handBox: blessed.Widgets.BoxElement;
   private logBox: blessed.Widgets.BoxElement;
   private actionBox: blessed.Widgets.BoxElement;
+  private actionList: blessed.Widgets.ListElement;
+  private actionHintBox: blessed.Widgets.BoxElement;
   private statusBox: blessed.Widgets.BoxElement;
   private promptBox: blessed.Widgets.BoxElement;
-  private input: blessed.Widgets.TextboxElement;
 
   private client: PokerClient;
   private roomId: string;
   private playerId: string | null = null;
   private currentState: GameState | null = null;
   private logs: string[] = [];
+  private currentActions: ActionOption[] = [];
+  private selectedActionIndex = 0;
 
   constructor(client: PokerClient, roomId: string) {
     this.client = client;
@@ -34,9 +43,10 @@ export class CliRenderer {
       top: 0,
       left: 0,
       width: '70%',
-      height: '60%',
+      height: '62%',
       border: { type: 'line' },
       tags: true,
+      label: ' 牌桌 ',
       style: { border: { fg: 'cyan' } },
     });
 
@@ -45,45 +55,76 @@ export class CliRenderer {
       top: 0,
       right: 0,
       width: '30%',
-      height: '30%',
+      height: '28%',
       border: { type: 'line' },
       tags: true,
+      label: ' 你的手牌 ',
       style: { border: { fg: 'green' } },
     });
 
     this.statusBox = blessed.box({
       parent: this.screen,
-      top: '30%',
+      top: '28%',
       right: 0,
       width: '30%',
-      height: '30%',
+      height: '24%',
       border: { type: 'line' },
       tags: true,
+      label: ' 当前状态 ',
       style: { border: { fg: 'yellow' } },
-    });
-
-    this.logBox = blessed.box({
-      parent: this.screen,
-      top: '60%',
-      left: 0,
-      width: '70%',
-      height: '30%',
-      border: { type: 'line' },
-      tags: true,
-      scrollable: true,
-      alwaysScroll: true,
-      style: { border: { fg: 'magenta' } },
     });
 
     this.actionBox = blessed.box({
       parent: this.screen,
-      top: '60%',
+      top: '52%',
       right: 0,
       width: '30%',
-      height: '30%',
+      height: '38%',
       border: { type: 'line' },
       tags: true,
+      label: ' 可执行动作 ',
       style: { border: { fg: 'red' } },
+    });
+
+    this.actionList = blessed.list({
+      parent: this.actionBox,
+      top: 0,
+      left: 0,
+      width: '100%-2',
+      height: '65%-1',
+      keys: true,
+      mouse: true,
+      vi: true,
+      tags: true,
+      style: {
+        selected: {
+          bg: 'blue',
+          fg: 'white',
+        },
+      },
+    });
+
+    this.actionHintBox = blessed.box({
+      parent: this.actionBox,
+      bottom: 0,
+      left: 1,
+      width: '100%-2',
+      height: '35%-1',
+      tags: true,
+    });
+
+    this.logBox = blessed.box({
+      parent: this.screen,
+      top: '62%',
+      left: 0,
+      width: '70%',
+      height: '28%',
+      border: { type: 'line' },
+      tags: true,
+      label: ' 牌桌日志 ',
+      scrollable: true,
+      alwaysScroll: true,
+      style: { border: { fg: 'magenta' } },
     });
 
     this.promptBox = blessed.box({
@@ -93,15 +134,7 @@ export class CliRenderer {
       width: '100%',
       height: 3,
       border: { type: 'line' },
-    });
-
-    this.input = blessed.textbox({
-      parent: this.promptBox,
-      top: 0,
-      left: 1,
-      width: '100%-2',
-      height: 1,
-      inputOnFocus: true,
+      tags: true,
     });
 
     this.client.onState((state) => {
@@ -111,18 +144,29 @@ export class CliRenderer {
 
     this.client.onConnected((id) => {
       this.playerId = id;
-      this.log('已连接，玩家ID: ' + id.slice(0, 8));
+      this.log('已连接到牌桌');
     });
 
     this.client.onError((msg) => {
       this.log('错误: ' + msg);
     });
 
-    this.input.on('submit', (value: string) => {
-      this.handleInput(value.trim().toLowerCase());
-      this.input.setValue('');
-      this.input.focus();
-      this.screen.render();
+    this.actionList.on('select', (_, index) => {
+      this.selectedActionIndex = Number(index);
+      const action = this.currentActions[this.selectedActionIndex];
+      action?.run();
+    });
+
+    this.actionList.on('keypress', (_, key) => {
+      if (key.name === 'down' || key.name === 'up') {
+        if (key.name === 'down') {
+          this.selectedActionIndex = Math.min(this.currentActions.length - 1, this.selectedActionIndex + 1);
+        }
+        if (key.name === 'up') {
+          this.selectedActionIndex = Math.max(0, this.selectedActionIndex - 1);
+        }
+        this.renderActionPanel();
+      }
     });
 
     this.screen.key(['q', 'C-c'], () => {
@@ -130,110 +174,26 @@ export class CliRenderer {
       process.exit(0);
     });
 
-    this.screen.key(['f'], () => {
-      this.client.action(this.roomId, 'fold');
-      this.log('操作: 弃牌');
+    this.screen.key(['f'], () => this.triggerNamedAction('弃牌'));
+    this.screen.key(['c'], () => this.triggerNamedAction('跟注'));
+    this.screen.key(['r'], () => this.triggerNamedAction('加注'));
+    this.screen.key(['enter'], () => {
+      if (this.currentActions.length > 0) {
+        const action = this.currentActions[Math.max(0, this.selectedActionIndex)];
+        action?.run();
+      }
     });
-
-    this.screen.key(['c'], () => {
-      this.client.action(this.roomId, 'call');
-      this.log('操作: 跟注');
-    });
-
-    this.screen.key(['r'], () => {
-      this.input.setValue('raise ');
-      this.input.focus();
-      this.screen.render();
-    });
-
     this.screen.key(['p'], () => {
       this.showProfilePrompt();
     });
+    this.screen.key(['s'], () => {
+      this.triggerNamedAction('开始游戏');
+    });
 
-    this.input.focus();
-    this.renderActionHelp();
+    this.renderActionPanel();
+    this.renderPrompt();
+    this.actionList.focus();
     this.screen.render();
-  }
-
-  private handleInput(value: string): void {
-    if (!value) return;
-
-    const [cmd, ...args] = value.split(' ');
-
-    switch (cmd) {
-      case 'fold':
-      case 'f':
-        this.client.action(this.roomId, 'fold');
-        this.log('操作: 弃牌');
-        break;
-      case 'check':
-      case 'ch':
-        this.client.action(this.roomId, 'check');
-        this.log('操作: 过牌');
-        break;
-      case 'call':
-      case 'c':
-        this.client.action(this.roomId, 'call');
-        this.log('操作: 跟注');
-        break;
-      case 'raise':
-      case 'r': {
-        const amount = parseInt(args[0], 10);
-        if (isNaN(amount)) {
-          this.log('用法: raise <金额>');
-          return;
-        }
-        this.client.action(this.roomId, 'raise', amount);
-        this.log(`操作: 加注到 ${amount}`);
-        break;
-      }
-      case 'start':
-        this.client.startGame(this.roomId);
-        this.log('开始游戏');
-        break;
-      case 'profile':
-      case 'p':
-        if (args.length === 0) {
-          this.showProfilePrompt();
-          return;
-        }
-        this.showProfileByName(args.join(' '));
-        break;
-      case 'profiles':
-        this.log('玩家简介: ' + this.getVisibleProfiles().map((profile) => profile.playerName).join(', '));
-        break;
-      case 'q':
-      case 'quit':
-        this.client.disconnect();
-        process.exit(0);
-        break;
-      default:
-        this.log('未知命令: ' + cmd);
-    }
-  }
-
-  private log(msg: string): void {
-    this.logs.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
-    if (this.logs.length > 100) this.logs.shift();
-    this.logBox.setContent(this.logs.join('\n'));
-    this.logBox.setScrollPerc(100);
-    this.screen.render();
-  }
-
-  private renderActionHelp(): void {
-    const help = [
-      ' {bold}快捷操作:{/bold}',
-      '',
-      ' f / fold    弃牌',
-      ' c / call    跟注',
-      ' ch / check  过牌',
-      ' r <金额>    加注',
-      ' p / profile  玩家简介',
-      '',
-      ' start       开始游戏',
-      ' q / quit    退出',
-    ].join('\n');
-    this.actionBox.setContent(help);
   }
 
   private render(): void {
@@ -243,67 +203,67 @@ export class CliRenderer {
     this.renderTable(state);
     this.renderHand(state);
     this.renderStatus(state);
+    this.renderActionPanel();
+    this.renderPrompt();
+    this.screen.render();
   }
 
   private renderTable(state: GameState): void {
     const lines: string[] = [];
-
-    lines.push('  {center}{bold}牌桌{/bold}{/center}');
-    lines.push('');
-    lines.push('  {center}{bold}公共牌{/bold}{/center}');
-    lines.push('');
     const community = state.communityCards.length > 0
-      ? state.communityCards.map(c => ` {${c.color === 'red' ? 'red-fg' : 'white-fg'}}${c.display}{/${c.color === 'red' ? 'red-fg' : 'white-fg'}} `).join(' ')
-      : ' (等待发牌) ';
+      ? state.communityCards.map((card) => this.renderCard(this.normalizeCardDisplay(card))).join(' ')
+      : '（等待发牌）';
+
+    lines.push(`  {bold}公共牌{/bold}`);
+    lines.push('');
     lines.push(`  ${community}`);
     lines.push('');
-
-    lines.push(`  {bold}底池:{/bold} ${state.pot}`);
-    lines.push(`  {bold}当前下注:{/bold} ${state.currentBet}`);
+    lines.push(`  {bold}底池：{/bold}${state.pot}    {bold}当前下注：{/bold}${state.currentBet}`);
     lines.push('');
+    lines.push('  {bold}玩家{/bold}');
 
-    lines.push('  {bold}玩家:{/bold}');
-    for (const p of state.players) {
-      const isDealer = state.players[state.dealerIndex]?.id === p.id;
-      const isCurrent = state.currentPlayerId === p.id;
-      const isMe = p.id === this.playerId;
-      const prefix = isDealer ? '[D]' : '   ';
-      const indicator = isCurrent ? ' ▶ ' : '   ';
-      const nameTag = isMe ? `{bold}${p.name} (你){/bold}` : p.name;
-      const statusColor = p.status === 'folded' ? 'gray' : p.status === 'all-in' ? 'yellow' : 'white';
-      lines.push(`  ${prefix}${indicator}{${statusColor}-fg}${nameTag}{/${statusColor}-fg} 筹码:${p.chips} 下注:${p.bet} [${p.status}]{/}`);
+    for (const player of state.players) {
+      const isDealer = state.players[state.dealerIndex]?.id === player.id;
+      const isCurrent = state.currentPlayerId === player.id;
+      const isMe = player.id === this.playerId;
+      const marker = isDealer ? '[D]' : '   ';
+      const turn = isCurrent ? '▶' : ' ';
+      const name = isMe ? `${player.name} (你)` : player.name;
+      const statusText = this.mapStatus(player.status);
+      lines.push(`  ${turn} ${marker} ${name.padEnd(16, ' ')} 筹码 ${String(player.chips).padStart(4, ' ')}  本轮 ${String(player.bet).padStart(3, ' ')}  ${statusText}`);
     }
 
     this.tableBox.setContent(lines.join('\n'));
-    this.screen.render();
   }
 
   private renderHand(state: GameState): void {
+    const me = this.getMe(state);
     const lines: string[] = [];
-    lines.push('  {center}{bold}我的手牌{/bold}{/center}');
-    lines.push('');
 
-    const me = state.players.find(p => p.id === this.playerId);
-    if (!me || !me.hand) {
-      lines.push('  等待发牌...');
+    if (!me?.hand) {
+      lines.push('');
+      lines.push('  还没发到你的手牌');
+      lines.push('');
+      lines.push('  开局后会显示在这里');
       this.handBox.setContent(lines.join('\n'));
       return;
     }
 
-    const cards = me.hand.map(c => {
-      const isRed = c.includes('♥') || c.includes('♦');
-      return ` {${isRed ? 'red-fg' : 'white-fg'}}${c}{/${isRed ? 'red-fg' : 'white-fg'}} `;
-    }).join('  ');
-
-    lines.push('  ' + cards);
     lines.push('');
-    lines.push(`  筹码: ${me.chips}`);
-    lines.push(`  状态: ${me.status}`);
+    lines.push(`  ${me.hand.map((card) => this.renderCard(card)).join('   ')}`);
+    lines.push('');
+    lines.push(`  {bold}筹码：{/bold}${me.chips}`);
+    lines.push(`  {bold}状态：{/bold}${this.mapStatus(me.status)}`);
 
     this.handBox.setContent(lines.join('\n'));
   }
 
   private renderStatus(state: GameState): void {
+    const me = this.getMe(state);
+    const isMyTurn = state.currentPlayerId === this.playerId;
+    const currentPlayer = state.players.find((player) => player.id === state.currentPlayerId);
+    const toCall = me ? Math.max(0, state.currentBet - me.bet) : 0;
+
     const phaseNames: Record<string, string> = {
       waiting: '等待中',
       preflop: '翻牌前',
@@ -311,25 +271,179 @@ export class CliRenderer {
       turn: '转牌圈',
       river: '河牌圈',
       showdown: '摊牌',
-      ended: '结束',
+      ended: '结算中',
     };
 
-    const me = state.players.find(p => p.id === this.playerId);
-    const isMyTurn = state.currentPlayerId === this.playerId;
-
-    const lines: string[] = [];
-    lines.push('  {center}{bold}游戏状态{/bold}{/center}');
-    lines.push('');
-    lines.push(`  阶段: ${phaseNames[state.phase] || state.phase}`);
-    lines.push(`  小盲: ${state.smallBlind}`);
-    lines.push(`  大盲: ${state.bigBlind}`);
-    lines.push('');
-    lines.push(isMyTurn ? '  {green-fg}{bold}▶ 轮到你了!{/bold}{/green-fg}' : '  等待其他玩家...');
-    lines.push('');
-    if (me) lines.push(`  你的筹码: ${me.chips}`);
+    const lines = [
+      '',
+      `  阶段：${phaseNames[state.phase] || state.phase}`,
+      `  轮到：${currentPlayer ? currentPlayer.name : '暂无'}`,
+      `  你需补：${toCall}`,
+      `  你的本轮下注：${me?.bet ?? 0}`,
+      '',
+      isMyTurn
+        ? '  {green-fg}{bold}现在轮到你行动{/bold}{/green-fg}'
+        : '  等待其他玩家行动',
+      '',
+      `  小盲 / 大盲：${state.smallBlind} / ${state.bigBlind}`,
+    ];
 
     this.statusBox.setContent(lines.join('\n'));
-    this.screen.render();
+  }
+
+  private renderActionPanel(): void {
+    const state = this.currentState;
+    const me = state ? this.getMe(state) : null;
+    const actions = this.buildActionOptions();
+    this.currentActions = actions;
+
+    const items = actions.length > 0
+      ? actions.map((action) => action.label)
+      : ['当前没有可执行动作'];
+
+    this.actionList.setItems(items);
+    if (actions.length > 0) {
+      this.selectedActionIndex = Math.min(this.selectedActionIndex, actions.length - 1);
+      this.actionList.select(Math.max(0, this.selectedActionIndex));
+      this.actionList.focus();
+    } else {
+      this.selectedActionIndex = 0;
+    }
+
+    const selectedAction = actions[Math.max(0, this.selectedActionIndex)] ?? null;
+    const toCall = me && state ? Math.max(0, state.currentBet - me.bet) : 0;
+
+    const lines = [
+      selectedAction
+        ? `  {bold}说明：{/bold}${selectedAction.hint}`
+        : '  现在不是你的操作阶段',
+      '',
+      `  快捷键：{bold}↑↓{/bold} 选项  {bold}Enter{/bold} 确认`,
+      '  也可以直接按 {bold}f{/bold}/{bold}c{/bold}/{bold}r{/bold}/{bold}s{/bold}/{bold}p{/bold}',
+      '',
+      `  当前需要补：${toCall}`,
+    ];
+
+    this.actionHintBox.setContent(lines.join('\n'));
+  }
+
+  private renderPrompt(): void {
+    const state = this.currentState;
+    const me = state ? this.getMe(state) : null;
+    const isMyTurn = state?.currentPlayerId === this.playerId;
+    const currentPlayer = state?.players.find((player) => player.id === state.currentPlayerId);
+    const toCall = me && state ? Math.max(0, state.currentBet - me.bet) : 0;
+
+    const text = !state
+      ? '  正在连接牌桌...'
+      : isMyTurn
+        ? `  轮到你了：请在右下角选择动作。当前需要补 ${toCall}。按 p 可查看玩家简介。`
+        : `  当前轮到 ${currentPlayer?.name ?? '其他玩家'}。你的手牌在右上角，按 p 可查看玩家简介。`;
+
+    this.promptBox.setContent(text);
+  }
+
+  private buildActionOptions(): ActionOption[] {
+    const state = this.currentState;
+    const me = state ? this.getMe(state) : null;
+    if (!state || !me) return [];
+
+    const isMyTurn = state.currentPlayerId === this.playerId;
+    const toCall = Math.max(0, state.currentBet - me.bet);
+    const options: ActionOption[] = [];
+
+    if (state.phase === 'waiting' && me.isHost) {
+      options.push({
+        label: '开始游戏',
+        hint: '房主可以在这里直接开始这一手牌。',
+        run: () => {
+          this.client.startGame(this.roomId);
+          this.log('开始游戏');
+        },
+      });
+    }
+
+    if (!isMyTurn || me.status !== 'active') {
+      return options;
+    }
+
+    options.push({
+      label: '弃牌',
+      hint: '放弃本手牌，立刻退出这一手。',
+      run: () => {
+        this.client.action(this.roomId, 'fold');
+        this.log('操作: 弃牌');
+      },
+    });
+
+    if (toCall === 0) {
+      options.push({
+        label: '过牌',
+        hint: '当前无需补筹码，可以选择过牌继续等待后续行动。',
+        run: () => {
+          this.client.action(this.roomId, 'check');
+          this.log('操作: 过牌');
+        },
+      });
+    } else {
+      options.push({
+        label: '跟注',
+        hint: `补上 ${toCall} 筹码，继续留在这一手牌里。`,
+        run: () => {
+          this.client.action(this.roomId, 'call');
+          this.log('操作: 跟注');
+        },
+      });
+    }
+
+    if (me.chips > toCall) {
+      options.push({
+        label: '加注',
+        hint: '输入你想加注到的总金额，主动给桌面施压。',
+        run: () => {
+          this.showRaisePrompt();
+        },
+      });
+    }
+
+    return options;
+  }
+
+  private triggerNamedAction(label: string): void {
+    const action = this.currentActions.find((item) => item.label === label);
+    action?.run();
+  }
+
+  private showRaisePrompt(): void {
+    const state = this.currentState;
+    const me = state ? this.getMe(state) : null;
+    if (!state || !me) return;
+
+    const minimum = Math.max(state.currentBet + 1, me.bet + 1);
+    const prompt = blessed.prompt({
+      parent: this.screen,
+      top: 'center',
+      left: 'center',
+      width: 36,
+      height: 8,
+      border: { type: 'line' },
+      label: ' 加注 ',
+    });
+
+    prompt.readInput(`输入加注到的总金额（至少 ${minimum}）`, String(Math.max(minimum, state.currentBet + state.bigBlind)), (_err, value) => {
+      prompt.destroy();
+      const amount = parseInt(value ?? '', 10);
+      if (!Number.isFinite(amount)) {
+        this.log('取消加注');
+      } else {
+        this.client.action(this.roomId, 'raise', amount);
+        this.log(`操作: 加注到 ${amount}`);
+      }
+
+      this.renderActionPanel();
+      this.renderPrompt();
+      this.screen.render();
+    });
   }
 
   private getVisibleProfiles(): Array<PublicPlayerProfile | GmPlayerProfile> {
@@ -376,16 +490,6 @@ export class CliRenderer {
     });
   }
 
-  private showProfileByName(name: string): void {
-    const profile = this.getVisibleProfiles().find((item) => item.playerName.toLowerCase().includes(name.toLowerCase()));
-    if (!profile) {
-      this.log(`未找到玩家简介: ${name}`);
-      return;
-    }
-
-    this.showProfileCard(profile.playerName);
-  }
-
   private showProfileCard(playerName: string): void {
     const profile = this.getVisibleProfiles().find((item) => item.playerName === playerName);
     if (!profile) return;
@@ -410,7 +514,7 @@ export class CliRenderer {
       parent: this.screen,
       border: { type: 'line' },
       width: '70%',
-      height: 16,
+      height: 18,
       top: 'center',
       left: 'center',
       label: ` ${playerName} `,
@@ -422,12 +526,66 @@ export class CliRenderer {
 
     message.display(lines.join('\n'), 0, () => {
       message.destroy();
-      this.input.focus();
+      this.actionList.focus();
       this.screen.render();
-      });
+    });
+  }
+
+  private getMe(state: GameState) {
+    return state.players.find((player) => player.id === this.playerId) ?? null;
+  }
+
+  private mapStatus(status: string): string {
+    const map: Record<string, string> = {
+      waiting: '等待',
+      active: '进行中',
+      folded: '已弃牌',
+      'all-in': 'All-in',
+    };
+
+    return map[status] || status;
+  }
+
+  private renderCard(card: string): string {
+    const isRed = card.includes('♥') || card.includes('♦');
+    const color = isRed ? 'red-fg' : 'white-fg';
+    return `{${color}}[ ${card} ]{/${color}}`;
+  }
+
+  private normalizeCardDisplay(card: unknown): string {
+    if (typeof card === 'string') {
+      return card;
+    }
+
+    if (card && typeof card === 'object') {
+      const maybeVisible = card as { display?: string; suit?: string; rank?: number | string };
+      if (typeof maybeVisible.display === 'string') {
+        return maybeVisible.display;
+      }
+
+      if (maybeVisible.suit && maybeVisible.rank) {
+        const rankMap: Record<string, string> = {
+          '11': 'J',
+          '12': 'Q',
+          '13': 'K',
+          '14': 'A',
+        };
+        const rank = String(maybeVisible.rank);
+        return `${rankMap[rank] || rank}${maybeVisible.suit}`;
+      }
+    }
+
+    return '??';
   }
 
   private isGmProfile(profile: PublicPlayerProfile | GmPlayerProfile): profile is GmPlayerProfile {
     return 'privateSummary' in profile;
+  }
+
+  private log(msg: string): void {
+    this.logs.push(`[${new Date().toLocaleTimeString()}] ${msg}`);
+    if (this.logs.length > 100) this.logs.shift();
+    this.logBox.setContent(this.logs.join('\n'));
+    this.logBox.setScrollPerc(100);
   }
 }

@@ -30,3 +30,28 @@ export async function startLocalServer(port: number): Promise<void> {
 
   throw new Error('服务器启动超时');
 }
+
+export function findAvailablePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') {
+        server.close(() => reject(new Error('无法分配本地端口')));
+        return;
+      }
+
+      const { port } = address;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}

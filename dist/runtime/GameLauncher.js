@@ -21,6 +21,7 @@ class GameLauncher {
     }
     async launch(config) {
         if (config.mode === 'local') {
+            config.host = await this.allocateLocalHost();
             await this.ensureLocalServer(config.host);
         }
         const client = new Client_1.PokerClient();
@@ -41,6 +42,10 @@ class GameLauncher {
         if (config.mode !== 'online-join') {
             void this.prepareRoom(config, client);
         }
+    }
+    async allocateLocalHost() {
+        const port = await (0, serverBootstrap_1.findAvailablePort)();
+        return `http://localhost:${port}`;
     }
     async ensureLocalServer(host) {
         const port = this.extractPort(host);

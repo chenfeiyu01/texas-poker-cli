@@ -186,7 +186,7 @@ class CliRenderer {
     renderTable(state) {
         const lines = [];
         const community = state.communityCards.length > 0
-            ? state.communityCards.map((card) => this.renderCard(card.display)).join(' ')
+            ? state.communityCards.map((card) => this.renderCard(this.normalizeCardDisplay(card))).join(' ')
             : '（等待发牌）';
         lines.push(`  {bold}公共牌{/bold}`);
         lines.push('');
@@ -483,6 +483,28 @@ class CliRenderer {
         const isRed = card.includes('♥') || card.includes('♦');
         const color = isRed ? 'red-fg' : 'white-fg';
         return `{${color}}[ ${card} ]{/${color}}`;
+    }
+    normalizeCardDisplay(card) {
+        if (typeof card === 'string') {
+            return card;
+        }
+        if (card && typeof card === 'object') {
+            const maybeVisible = card;
+            if (typeof maybeVisible.display === 'string') {
+                return maybeVisible.display;
+            }
+            if (maybeVisible.suit && maybeVisible.rank) {
+                const rankMap = {
+                    '11': 'J',
+                    '12': 'Q',
+                    '13': 'K',
+                    '14': 'A',
+                };
+                const rank = String(maybeVisible.rank);
+                return `${rankMap[rank] || rank}${maybeVisible.suit}`;
+            }
+        }
+        return '??';
     }
     isGmProfile(profile) {
         return 'privateSummary' in profile;
