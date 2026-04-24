@@ -201,7 +201,10 @@ class Game {
     getState(forPlayerId) {
         return {
             phase: this.phase,
-            communityCards: this.communityCards,
+            communityCards: this.communityCards.map((card) => ({
+                display: card.display,
+                color: card.color,
+            })),
             pot: this.pot + this.players.reduce((sum, p) => sum + p.bet, 0),
             currentBet: this.currentBet,
             currentPlayerId: this.players[this.currentPlayerIndex]?.id ?? null,

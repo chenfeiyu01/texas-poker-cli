@@ -14,9 +14,14 @@ export enum GamePhase {
   ENDED = 'ended',
 }
 
+export interface VisibleCard {
+  display: string;
+  color: 'red' | 'black';
+}
+
 export interface GameState {
   phase: GamePhase;
-  communityCards: Card[];
+  communityCards: VisibleCard[];
   pot: number;
   currentBet: number;
   currentPlayerId: string | null;
@@ -265,7 +270,10 @@ export class Game {
   getState(forPlayerId?: string): GameState {
     return {
       phase: this.phase,
-      communityCards: this.communityCards,
+      communityCards: this.communityCards.map((card) => ({
+        display: card.display,
+        color: card.color,
+      })),
       pot: this.pot + this.players.reduce((sum, p) => sum + p.bet, 0),
       currentBet: this.currentBet,
       currentPlayerId: this.players[this.currentPlayerIndex]?.id ?? null,
