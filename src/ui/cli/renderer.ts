@@ -211,7 +211,7 @@ export class CliRenderer {
   private renderTable(state: GameState): void {
     const lines: string[] = [];
     const community = state.communityCards.length > 0
-      ? state.communityCards.map((card) => this.renderCard(this.normalizeCardDisplay(card))).join(' ')
+      ? state.communityCards.map((card) => this.renderCard(card.display)).join(' ')
       : '（等待发牌）';
 
     lines.push(`  {bold}公共牌{/bold}`);
@@ -550,32 +550,6 @@ export class CliRenderer {
     const isRed = card.includes('♥') || card.includes('♦');
     const color = isRed ? 'red-fg' : 'white-fg';
     return `{${color}}[ ${card} ]{/${color}}`;
-  }
-
-  private normalizeCardDisplay(card: unknown): string {
-    if (typeof card === 'string') {
-      return card;
-    }
-
-    if (card && typeof card === 'object') {
-      const maybeVisible = card as { display?: string; suit?: string; rank?: number | string };
-      if (typeof maybeVisible.display === 'string') {
-        return maybeVisible.display;
-      }
-
-      if (maybeVisible.suit && maybeVisible.rank) {
-        const rankMap: Record<string, string> = {
-          '11': 'J',
-          '12': 'Q',
-          '13': 'K',
-          '14': 'A',
-        };
-        const rank = String(maybeVisible.rank);
-        return `${rankMap[rank] || rank}${maybeVisible.suit}`;
-      }
-    }
-
-    return '??';
   }
 
   private isGmProfile(profile: PublicPlayerProfile | GmPlayerProfile): profile is GmPlayerProfile {

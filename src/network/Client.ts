@@ -12,6 +12,14 @@ export class PokerClient {
     this.socket = io(url);
 
     this.socket.on('state', (state: GameState) => {
+      if (!this.isStatePayloadCompatible(state)) {
+        const errorMessage = '服务端版本不匹配：请升级到支持新牌面协议的服务端。';
+        for (const listener of this.errorListeners) {
+          listener(errorMessage);
+        }
+        return;
+      }
+
       for (const listener of this.stateListeners) {
         listener(state);
       }
@@ -85,5 +93,11 @@ export class PokerClient {
 
   offState(listener: (state: GameState) => void): void {
     this.stateListeners = this.stateListeners.filter(l => l !== listener);
+  }
+
+  private isStatePayloadCompatible(state: GameState): boolean {
+    return Array.isArray(state.communityCards) && state.communityCards.every((card) => {
+      return Boolean(card && typeof card === 'object' && typeof (card as { display?: unknown }).display === 'string');
+    });
   }
 }

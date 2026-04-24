@@ -10,6 +10,13 @@ class PokerClient {
     connect(url = 'http://localhost:3000') {
         this.socket = (0, socket_io_client_1.io)(url);
         this.socket.on('state', (state) => {
+            if (!this.isStatePayloadCompatible(state)) {
+                const errorMessage = '服务端版本不匹配：请升级到支持新牌面协议的服务端。';
+                for (const listener of this.errorListeners) {
+                    listener(errorMessage);
+                }
+                return;
+            }
             for (const listener of this.stateListeners) {
                 listener(state);
             }
@@ -75,6 +82,11 @@ class PokerClient {
     }
     offState(listener) {
         this.stateListeners = this.stateListeners.filter(l => l !== listener);
+    }
+    isStatePayloadCompatible(state) {
+        return Array.isArray(state.communityCards) && state.communityCards.every((card) => {
+            return Boolean(card && typeof card === 'object' && typeof card.display === 'string');
+        });
     }
 }
 exports.PokerClient = PokerClient;
