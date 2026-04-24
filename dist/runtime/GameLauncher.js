@@ -30,19 +30,17 @@ class GameLauncher {
         }
         else {
             await client.createRoom(config.roomId, config.playerName, { isGm: config.isGm });
-            await this.spawnBots(config);
-            if (config.autoStart) {
-                setTimeout(() => {
-                    client.startGame(config.roomId);
-                }, 1000);
-            }
         }
         this.installShutdownHook();
         if (config.uiMode === 'slacker') {
             new renderer_3.SlackerRenderer(client, config.roomId);
-            return;
         }
-        new renderer_1.CliRenderer(client, config.roomId);
+        else {
+            new renderer_1.CliRenderer(client, config.roomId);
+        }
+        if (config.mode !== 'online-join') {
+            void this.prepareRoom(config, client);
+        }
     }
     async ensureLocalServer(host) {
         const port = this.extractPort(host);
@@ -85,10 +83,23 @@ class GameLauncher {
                 model,
                 thinkMs: 1200 + Math.random() * 2400,
                 soul,
+                quiet: true,
             });
             this.bots.push(bot);
             await bot.start();
             await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+    }
+    async prepareRoom(config, client) {
+        try {
+            await this.spawnBots(config);
+            if (config.autoStart) {
+                await new Promise((resolve) => setTimeout(resolve, 500));
+                client.startGame(config.roomId);
+            }
+        }
+        catch (error) {
+            console.error('自动准备房间失败:', error);
         }
     }
     buildBotName(archetypeName, index) {

@@ -124,11 +124,8 @@ export class LobbyRenderer {
     const requestedTotalPlayers = await this.askNumber('几人对局', 4);
     const requestedAiCount = await this.askNumber('需要多少 AI', Math.max(1, requestedTotalPlayers - 1));
     const uiMode = await this.chooseUiMode();
-    const totalPlayers = requestedAiCount + 1;
-
-    if (requestedTotalPlayers !== totalPlayers) {
-      await this.showMessage(`本机局当前固定为 1 位真人 + N 个 AI，已调整为 ${totalPlayers} 人对局。`);
-    }
+    const aiCount = Math.max(1, Math.min(requestedAiCount, Math.max(1, requestedTotalPlayers - 1)));
+    const totalPlayers = aiCount + 1;
 
     return {
       mode: 'local',
@@ -137,7 +134,7 @@ export class LobbyRenderer {
       playerName,
       uiMode,
       totalPlayers,
-      aiCount: requestedAiCount,
+      aiCount,
       isGm: true,
       autoStart: true,
     };

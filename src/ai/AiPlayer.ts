@@ -12,6 +12,7 @@ export interface AiPlayerOptions {
   model: string;
   thinkMs?: number;
   soul: SoulProfile;
+  quiet?: boolean;
 }
 
 export class AiPlayer {
@@ -29,7 +30,9 @@ export class AiPlayer {
     this.client.connect(this.options.host);
 
     this.client.onConnected(() => {
-      console.log(`[AI ${this.options.name}] 已连接`);
+      if (!this.options.quiet) {
+        console.log(`[AI ${this.options.name}] 已连接`);
+      }
     });
 
     this.client.onState((state) => {
@@ -37,7 +40,9 @@ export class AiPlayer {
     });
 
     this.client.onError((msg) => {
-      console.error(`[AI ${this.options.name}] 错误:`, msg);
+      if (!this.options.quiet) {
+        console.error(`[AI ${this.options.name}] 错误:`, msg);
+      }
     });
 
     try {
@@ -54,7 +59,9 @@ export class AiPlayer {
       });
     }
 
-    console.log(`[AI ${this.options.name}] 已加入房间 ${this.options.room}`);
+    if (!this.options.quiet) {
+      console.log(`[AI ${this.options.name}] 已加入房间 ${this.options.room}`);
+    }
   }
 
   private async handleState(state: GameState): Promise<void> {
@@ -73,7 +80,9 @@ export class AiPlayer {
 
       const action = await this.decideAction(state, me.id);
       if (action) {
-        console.log(`[AI ${this.options.name}] 决策: ${action}`);
+        if (!this.options.quiet) {
+          console.log(`[AI ${this.options.name}] 决策: ${action}`);
+        }
         this.executeAction(action);
       }
 
@@ -105,7 +114,9 @@ export class AiPlayer {
 
       if (!response.ok) {
         const text = await response.text();
-        console.error(`[AI ${this.options.name}] API 错误:`, response.status, text);
+        if (!this.options.quiet) {
+          console.error(`[AI ${this.options.name}] API 错误:`, response.status, text);
+        }
         return this.fallbackAction(state, myId);
       }
 
@@ -113,7 +124,9 @@ export class AiPlayer {
       const raw = data.output_text?.trim() || data.choices?.[0]?.message?.content?.trim() || '';
       return this.parseAction(raw);
     } catch (err) {
-      console.error(`[AI ${this.options.name}] 请求失败:`, err);
+      if (!this.options.quiet) {
+        console.error(`[AI ${this.options.name}] 请求失败:`, err);
+      }
       return this.fallbackAction(state, myId);
     }
   }

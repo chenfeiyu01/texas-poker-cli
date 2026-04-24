@@ -32,22 +32,19 @@ export class GameLauncher {
       await client.joinRoom(config.roomId, config.playerName, { isGm: false });
     } else {
       await client.createRoom(config.roomId, config.playerName, { isGm: config.isGm });
-      await this.spawnBots(config);
-      if (config.autoStart) {
-        setTimeout(() => {
-          client.startGame(config.roomId);
-        }, 1000);
-      }
     }
 
     this.installShutdownHook();
 
     if (config.uiMode === 'slacker') {
       new SlackerRenderer(client, config.roomId);
-      return;
+    } else {
+      new CliRenderer(client, config.roomId);
     }
 
-    new CliRenderer(client, config.roomId);
+    if (config.mode !== 'online-join') {
+      void this.prepareRoom(config, client);
+    }
   }
 
   private async ensureLocalServer(host: string): Promise<void> {
@@ -95,10 +92,23 @@ export class GameLauncher {
         model,
         thinkMs: 1200 + Math.random() * 2400,
         soul,
+        quiet: true,
       });
       this.bots.push(bot);
       await bot.start();
       await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+  }
+
+  private async prepareRoom(config: GameLaunchConfig, client: PokerClient): Promise<void> {
+    try {
+      await this.spawnBots(config);
+      if (config.autoStart) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        client.startGame(config.roomId);
+      }
+    } catch (error) {
+      console.error('自动准备房间失败:', error);
     }
   }
 
