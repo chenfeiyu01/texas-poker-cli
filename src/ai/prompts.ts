@@ -36,89 +36,71 @@ export function buildPokerPrompt(state: GameState, myId: string, soul: SoulProfi
     .join('\n');
 
   const recentActions = state.session?.recentActions
+    .slice(-12)
     .map((action) => {
-      const amountText = action.declaredAmount ? `，声明金额 ${action.declaredAmount}` : '';
-      return `  - 第${action.handNumber}手/${phaseNames[action.phase] || action.phase}：${action.playerName} ${action.action}${amountText}，累计投入 ${action.totalBet}，思考 ${action.thinkTimeMs}ms`;
+      const amountText = action.declaredAmount ? ` ${action.declaredAmount}` : '';
+      return `- H${action.handNumber}/${phaseNames[action.phase] || action.phase} ${action.playerName} ${action.action}${amountText} total=${action.totalBet} think=${action.thinkTimeMs}ms`;
     })
-    .join('\n') || '  - 暂无';
+    .join('\n') || '- 暂无';
 
   const publicProfiles = state.session?.publicProfiles
-    .map((profile) => `  - ${profile.playerName}: ${profile.summary} 近期：${profile.recentNote}`)
-    .join('\n') || '  - 暂无';
+    .slice(0, 8)
+    .map((profile) => `- ${profile.playerName}: ${profile.summary}; 近期=${profile.recentNote}; 净输赢=${profile.netChips}`)
+    .join('\n') || '- 暂无';
 
   const privateMemory = state.session?.privateMemory;
   const privateSummary = privateMemory
     ? [
-        '## 你的本次会话记忆',
-        privateMemory.sessionSummary,
-        '',
-        '### 最近关键事件',
-        ...(privateMemory.recentEvents.map((event) => `- ${event}`)),
-        '',
-        '### 你对其他玩家的观察',
-        ...(privateMemory.playerReads.map((read) => `- ${read.playerName}: ${read.summary}`)),
+        `- 总结: ${privateMemory.sessionSummary}`,
+        ...privateMemory.recentEvents.slice(-6).map((event) => `- 事件: ${event}`),
+        ...privateMemory.playerReads.slice(0, 8).map((read) => `- 读牌 ${read.playerName}: ${read.summary}`),
       ].join('\n')
-    : '## 你的本次会话记忆\n暂无。';
+    : '- 暂无';
 
   const recentHands = state.session?.recentHands
-    .map((hand) => `  - ${hand.headline}`)
-    .join('\n') || '  - 暂无';
+    .slice(-4)
+    .map((hand) => `- H${hand.handNumber}: ${hand.headline}`)
+    .join('\n') || '- 暂无';
 
-  return `你是一位德州扑克高手，正在进行一场紧张刺激的牌局。请根据概率、对手行为和筹码深度做出最优决策。
-
-## 你的灵魂设定
-
-${buildSoulPrompt(soul)}
-
-## 当前牌局状态
-
-- **你的手牌**: ${handStr}
-- **公共牌**: ${communityStr}
-- **当前阶段**: ${phaseNames[state.phase] || state.phase}
-- **底池**: ${state.pot}
-- **当前总下注**: ${state.currentBet}
-- **你需要跟注**: ${toCall}
-- **你的筹码**: ${me.chips}
-- **你的已下注**: ${me.bet}
-
-## 玩家信息
-${playerInfo}
-
-## 最近公开行动
-${recentActions}
-
-## 公开玩家画像
-${publicProfiles}
-
-## 最近几手结果
-${recentHands}
-
-## 存活玩家数
-- 活跃: ${activePlayers.length}人
-- 已弃牌: ${foldedPlayers.length}人
-
-${privateSummary}
-
-## 决策规则
-1. **fold (弃牌)**: 当你认为胜率极低或赔率不合理时选择。会放弃已下注的筹码。
-2. **check (过牌)**: 当无人下注且轮到你时选择，不下注直接过。
-3. **call (跟注)**: 跟随当前最高下注，继续参与牌局。
-4. **raise <金额> (加注)**: 将总下注提升到指定金额。加注必须大于当前下注。
-
-## 策略提示
-- 翻牌前强牌(AA/KK/QQ/AK)可以积极加注
-- 翻牌后击中牌面(对子/两对/顺子/同花)时价值下注
-- 听牌时考虑底池赔率决定是否跟注
-- 观察对手下注模式、思考时长、最近输赢走势
-- 结合你的灵魂设定和近期经历，自然推理你此刻想如何回应牌桌
-
-## 输出格式
-请只输出以下四种格式之一，不要添加任何解释：
-- fold
-- check
-- call
-- raise <具体金额>
-
-你的决策是：
-`;
+  return [
+    '你是一个德州扑克 AI。基于 soul、桌面信息、下注节奏、思考时长、近期输赢与情绪，先做简短思考，再决定动作，并可说一句牌桌发言来影响别人。',
+    '',
+    '[SOUL]',
+    buildSoulPrompt(soul),
+    '',
+    '[TABLE]',
+    `手牌=${handStr}`,
+    `公共牌=${communityStr}`,
+    `阶段=${phaseNames[state.phase] || state.phase}`,
+    `底池=${state.pot} 当前下注=${state.currentBet} 跟注成本=${toCall}`,
+    `我的筹码=${me.chips} 我的已下注=${me.bet}`,
+    `活跃人数=${activePlayers.length} 弃牌人数=${foldedPlayers.length}`,
+    '',
+    '[PLAYERS]',
+    playerInfo,
+    '',
+    '[RECENT_ACTIONS]',
+    recentActions,
+    '',
+    '[PUBLIC_PROFILES]',
+    publicProfiles,
+    '',
+    '[RECENT_HANDS]',
+    recentHands,
+    '',
+    '[PRIVATE_MEMORY]',
+    privateSummary,
+    '',
+    '[LEGAL_ACTIONS]',
+    'fold',
+    'check',
+    'call',
+    'raise <金额>',
+    '',
+    '[OUTPUT]',
+    '只输出一个 JSON 对象，不要输出 markdown，不要输出代码块。',
+    '格式如下：',
+    '{"reasoning":"一句到三句，简短说明你为什么这么做","action":"fold/check/call/raise <金额>","speech":"一句牌桌发言；如果不想说话可输出..."}',
+    '要求：reasoning 要简短，speech 要像真人牌桌发言，可以虚张声势、骗人、挑衅、装弱，也可以输出 ...。',
+  ].join('\n');
 }

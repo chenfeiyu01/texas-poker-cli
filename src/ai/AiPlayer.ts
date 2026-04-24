@@ -2,6 +2,7 @@ import { PokerClient } from '../network/Client';
 import { GameState } from '../core/Game';
 import { buildPokerPrompt } from './prompts';
 import type { SoulProfile } from './soul';
+import type { AiDecisionLog } from '../session/types';
 
 export interface AiPlayerOptions {
   host: string;
@@ -15,11 +16,23 @@ export interface AiPlayerOptions {
   quiet?: boolean;
 }
 
+interface DecisionResult {
+  action: string;
+  log: AiDecisionLog;
+}
+
+interface ParsedDecisionEnvelope {
+  action: string | null;
+  reasoning: string;
+  speech: string;
+}
+
 export class AiPlayer {
   private client: PokerClient;
   private options: AiPlayerOptions;
-  private isMyTurn = false;
   private processing = false;
+  private latestState: GameState | null = null;
+  private lastHandledTurnKey: string | null = null;
 
   constructor(options: AiPlayerOptions) {
     this.options = options;
@@ -30,19 +43,16 @@ export class AiPlayer {
     this.client.connect(this.options.host);
 
     this.client.onConnected(() => {
-      if (!this.options.quiet) {
-        console.log(`[AI ${this.options.name}] 已连接`);
-      }
+      this.logInfo('已连接');
     });
 
     this.client.onState((state) => {
+      this.latestState = state;
       this.handleState(state);
     });
 
     this.client.onError((msg) => {
-      if (!this.options.quiet) {
-        console.error(`[AI ${this.options.name}] 错误:`, msg);
-      }
+      this.handleActionError(msg);
     });
 
     try {
@@ -59,9 +69,7 @@ export class AiPlayer {
       });
     }
 
-    if (!this.options.quiet) {
-      console.log(`[AI ${this.options.name}] 已加入房间 ${this.options.room}`);
-    }
+    this.logInfo(`已加入房间 ${this.options.room}`);
   }
 
   private async handleState(state: GameState): Promise<void> {
@@ -69,47 +77,51 @@ export class AiPlayer {
     if (!me) return;
 
     const isNowMyTurn = state.currentPlayerId === me.id;
+    const turnKey = this.buildTurnKey(state, me.id);
 
-    if (isNowMyTurn && !this.isMyTurn && !this.processing) {
-      this.isMyTurn = true;
+    if (isNowMyTurn && this.lastHandledTurnKey !== turnKey && !this.processing) {
       this.processing = true;
+      this.lastHandledTurnKey = turnKey;
 
       // 稍微延迟，模拟思考时间
       const thinkMs = this.options.thinkMs ?? 2000 + Math.random() * 2000;
       await new Promise((r) => setTimeout(r, thinkMs));
 
-      const action = await this.decideAction(state, me.id);
-      if (action) {
-        if (!this.options.quiet) {
-          console.log(`[AI ${this.options.name}] 决策: ${action}`);
-        }
-        this.executeAction(action);
+      const decision = await this.decideAction(state, me.id);
+      if (decision) {
+        this.logInfo(`决策: ${decision.action}`);
+        this.client.reportAiDecision(this.options.room, decision.log);
+        this.executeAction(decision.action);
       }
 
       this.processing = false;
     }
-
-    if (!isNowMyTurn) {
-      this.isMyTurn = false;
-    }
   }
 
-  private async decideAction(state: GameState, myId: string): Promise<string | null> {
+  private async decideAction(state: GameState, myId: string): Promise<DecisionResult | null> {
     const prompt = buildPokerPrompt(state, myId, this.options.soul);
     const apiKey = this.options.apiKey?.trim();
+    const promptSummary = this.buildPromptSummary(prompt);
 
     if (!apiKey) {
-      return this.fallbackAction(state, myId);
+      return this.buildFallbackDecision(state, myId, {
+        promptSummary,
+        requestMode: this.shouldUseResponses() ? 'responses' : 'chat-completions',
+        durationMs: 0,
+        rawOutput: '',
+        errorMessage: '未配置 AI_API_KEY，已使用本地兜底策略',
+      });
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
+    const timeout = setTimeout(() => controller.abort(), this.getRequestTimeoutMs());
 
     try {
-      if (this.shouldUseChatCompletions()) {
-        return this.requestViaChatCompletions(prompt, apiKey, state, myId, controller.signal);
+      if (!this.shouldUseResponses()) {
+        return this.requestViaChatCompletions(prompt, apiKey, state, myId, controller.signal, promptSummary);
       }
 
+      const startedAt = Date.now();
       const response = await fetch(`${this.options.apiBase}/responses`, {
         method: 'POST',
         headers: {
@@ -117,47 +129,180 @@ export class AiPlayer {
           Authorization: `Bearer ${apiKey}`,
         },
         signal: controller.signal,
-        body: JSON.stringify({
-          model: this.options.model,
-          input: prompt,
-          temperature: 0.3,
-          max_output_tokens: 20,
-        }),
+        body: JSON.stringify(this.buildResponsesPayload(prompt)),
       });
 
+      const durationMs = Date.now() - startedAt;
       if (response.ok) {
-        const data = await response.json();
-        const raw = data.output_text?.trim() || data.choices?.[0]?.message?.content?.trim() || '';
+        const rawPayload = await response.text();
+        const data = this.tryParseJson(rawPayload);
+        const raw = this.extractResponsesText(data);
         if (raw) {
-          return this.parseAction(raw);
+          const parsed = this.parseDecisionEnvelope(raw);
+          const finalAction = this.normalizeAction(parsed.action, state, myId);
+          return {
+            action: finalAction,
+            log: {
+              model: this.options.model,
+              requestMode: 'responses',
+              durationMs,
+              promptSummary,
+              reasoningSummary: parsed.reasoning,
+              speech: parsed.speech,
+              rawOutput: raw,
+              finalAction,
+              usedFallback: !parsed.action || parsed.action !== finalAction,
+            },
+          };
         }
+
+        this.logError('Responses API 返回空文本，改用兜底动作');
+        return this.buildFallbackDecision(state, myId, {
+          promptSummary,
+          requestMode: 'responses',
+          durationMs,
+          rawOutput: rawPayload,
+          errorMessage: 'Responses API 返回空文本',
+        });
       }
 
       if (response.status === 404 || response.status === 400) {
-        return this.requestViaChatCompletions(prompt, apiKey, state, myId, controller.signal);
+        return this.requestViaChatCompletions(prompt, apiKey, state, myId, controller.signal, promptSummary);
       }
 
       if (!response.ok) {
         const text = await response.text();
-        if (!this.options.quiet) {
-          console.error(`[AI ${this.options.name}] API 错误:`, response.status, text);
-        }
-        return this.fallbackAction(state, myId);
+        this.logError(`API 错误: ${response.status}`, text);
+        return this.buildFallbackDecision(state, myId, {
+          promptSummary,
+          requestMode: 'responses',
+          durationMs,
+          rawOutput: text,
+          errorMessage: `Responses API 错误 ${response.status}`,
+        });
       }
 
-      return this.fallbackAction(state, myId);
+      return this.buildFallbackDecision(state, myId, {
+        promptSummary,
+        requestMode: 'responses',
+        durationMs,
+        rawOutput: '',
+        errorMessage: 'Responses API 未返回可用结果',
+      });
     } catch (err) {
-      if (!this.options.quiet) {
-        console.error(`[AI ${this.options.name}] 请求失败:`, err);
-      }
-      return this.fallbackAction(state, myId);
+      this.logError('请求失败:', err);
+      return this.buildFallbackDecision(state, myId, {
+        promptSummary,
+        requestMode: this.shouldUseResponses() ? 'responses' : 'chat-completions',
+        durationMs: 0,
+        rawOutput: '',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  private shouldUseChatCompletions(): boolean {
+  private shouldUseResponses(): boolean {
+    return this.isXbaiProvider() && /^gpt-5/i.test(this.options.model);
+  }
+
+  private isXbaiProvider(): boolean {
     return this.options.apiBase.includes('xbai.top');
+  }
+
+  private isKimiProvider(): boolean {
+    return this.options.apiBase.includes('api.moonshot.cn') || this.options.apiBase.includes('api.kimi.com/coding/v1');
+  }
+
+  private getRequestTimeoutMs(): number {
+    const configured = Number.parseInt(process.env.AI_REQUEST_TIMEOUT_MS || '', 10);
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+
+    if (this.shouldUseResponses()) {
+      return 30000;
+    }
+
+    if (this.isKimiProvider()) {
+      return 12000;
+    }
+
+    return 12000;
+  }
+
+  private getChatMaxTokens(): number {
+    const configured = Number.parseInt(process.env.AI_CHAT_MAX_TOKENS || '', 10);
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+
+    return this.isKimiProvider() ? 64 : 64;
+  }
+
+  private buildResponsesPayload(prompt: string): Record<string, unknown> {
+    const basePayload: Record<string, unknown> = {
+      model: this.options.model,
+      instructions: '你是一个德州扑克 AI。请返回包含 reasoning、action、speech 的 JSON。',
+      input: prompt,
+      max_output_tokens: this.getVisibleOutputMaxTokens(),
+      reasoning: { effort: 'minimal' },
+    };
+
+    if (!this.isXbaiProvider()) {
+      basePayload.temperature = 0.3;
+    }
+
+    return basePayload;
+  }
+
+  private buildChatCompletionsPayload(prompt: string): Record<string, unknown> {
+    const payload: Record<string, unknown> = {
+      model: this.options.model,
+      messages: [
+        {
+          role: 'system',
+          content: '你是一个德州扑克 AI。你必须只返回 JSON：{"reasoning":"","action":"","speech":""}。',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      max_tokens: this.getVisibleOutputMaxTokens(),
+    };
+
+    if (!this.isKimiProvider()) {
+      payload.temperature = 0.2;
+    }
+
+    if (this.isKimiProvider() && /^kimi-/i.test(this.options.model)) {
+      payload.thinking = { type: 'disabled' };
+    }
+
+    return payload;
+  }
+
+  private extractResponsesText(data: any): string {
+    if (typeof data?.output_text === 'string' && data.output_text.trim()) {
+      return data.output_text.trim();
+    }
+
+    const output = Array.isArray(data?.output) ? data.output : [];
+    for (const item of output) {
+      if (item?.type !== 'message' || !Array.isArray(item.content)) {
+        continue;
+      }
+
+      for (const content of item.content) {
+        if (content?.type === 'output_text' && typeof content.text === 'string' && content.text.trim()) {
+          return content.text.trim();
+        }
+      }
+    }
+
+    return '';
   }
 
   private async requestViaChatCompletions(
@@ -166,7 +311,9 @@ export class AiPlayer {
     state: GameState,
     myId: string,
     signal: AbortSignal,
-  ): Promise<string> {
+    promptSummary: string,
+  ): Promise<DecisionResult> {
+    const startedAt = Date.now();
     try {
       const response = await fetch(`${this.options.apiBase}/chat/completions`, {
         method: 'POST',
@@ -175,36 +322,174 @@ export class AiPlayer {
           Authorization: `Bearer ${apiKey}`,
         },
         signal,
-        body: JSON.stringify({
-          model: this.options.model,
-          messages: [
-            {
-              role: 'user',
-              content: prompt,
-            },
-          ],
-          temperature: 0.3,
-          max_tokens: 32,
-        }),
+        body: JSON.stringify(this.buildChatCompletionsPayload(prompt)),
       });
 
+      const durationMs = Date.now() - startedAt;
       if (!response.ok) {
         const text = await response.text();
-        if (!this.options.quiet) {
-          console.error(`[AI ${this.options.name}] Chat API 错误:`, response.status, text);
-        }
-        return this.fallbackAction(state, myId);
+        this.logError(`Chat API 错误: ${response.status}`, text);
+        return this.buildFallbackDecision(state, myId, {
+          promptSummary,
+          requestMode: 'chat-completions',
+          durationMs,
+          rawOutput: text,
+          errorMessage: `Chat API 错误 ${response.status}`,
+        });
       }
 
-      const data = await response.json();
-      const raw = data.choices?.[0]?.message?.content?.trim() || '';
-      return raw ? this.parseAction(raw) ?? this.fallbackAction(state, myId) : this.fallbackAction(state, myId);
-    } catch (err) {
-      if (!this.options.quiet) {
-        console.error(`[AI ${this.options.name}] Chat 请求失败:`, err);
+      const text = await response.text();
+      const raw = this.extractChatCompletionTextFromPayload(text);
+      const parsed = raw ? this.parseDecisionEnvelope(raw) : { action: null, reasoning: '', speech: '' };
+      const finalAction = this.normalizeAction(parsed.action, state, myId);
+      if (raw) {
+        return {
+          action: finalAction,
+          log: {
+            model: this.options.model,
+            requestMode: 'chat-completions',
+            durationMs,
+            promptSummary,
+            reasoningSummary: parsed.reasoning,
+            speech: parsed.speech,
+            rawOutput: raw,
+            finalAction,
+            usedFallback: !parsed.action || parsed.action !== finalAction,
+          },
+        };
       }
-      return this.fallbackAction(state, myId);
+
+      this.logError('Chat API 未返回可解析动作:', text);
+      return this.buildFallbackDecision(state, myId, {
+        promptSummary,
+        requestMode: 'chat-completions',
+        durationMs,
+        rawOutput: text,
+        errorMessage: 'Chat API 未返回可解析动作',
+      });
+    } catch (err) {
+      this.logError('Chat 请求失败:', err);
+      return this.buildFallbackDecision(state, myId, {
+        promptSummary,
+        requestMode: 'chat-completions',
+        durationMs: Date.now() - startedAt,
+        rawOutput: '',
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
     }
+  }
+
+  private buildFallbackDecision(
+    state: GameState,
+    myId: string,
+    input: {
+      promptSummary: string;
+      requestMode: 'chat-completions' | 'responses';
+      durationMs: number;
+      rawOutput: string;
+      errorMessage?: string;
+    },
+  ): DecisionResult {
+    const action = this.fallbackAction(state, myId);
+    return {
+      action,
+      log: {
+        model: this.options.model,
+        requestMode: input.requestMode,
+        durationMs: input.durationMs,
+        promptSummary: input.promptSummary,
+        reasoningSummary: '模型没有返回可解析的思考内容，已切换到本地兜底策略。',
+        speech: '...',
+        rawOutput: input.rawOutput,
+        finalAction: action,
+        usedFallback: true,
+        errorMessage: input.errorMessage,
+      },
+    };
+  }
+
+  private buildPromptSummary(prompt: string): string {
+    return prompt
+      .split('\n')
+      .filter((line) => line.trim())
+      .slice(0, 10)
+      .join(' | ')
+      .slice(0, 320);
+  }
+
+  private getVisibleOutputMaxTokens(): number {
+    const configured = Number.parseInt(process.env.AI_VISIBLE_OUTPUT_MAX_TOKENS || '', 10);
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+
+    return 220;
+  }
+
+  private extractChatCompletionTextFromPayload(payload: string): string {
+    const direct = this.extractChatCompletionText(this.tryParseJson(payload));
+    if (direct) {
+      return direct;
+    }
+
+    return this.extractSseChatCompletionText(payload);
+  }
+
+  private tryParseJson(payload: string): any {
+    try {
+      return JSON.parse(payload);
+    } catch {
+      return null;
+    }
+  }
+
+  private extractChatCompletionText(data: any): string {
+    const content = data?.choices?.[0]?.message?.content;
+    if (typeof content === 'string') {
+      return content.trim();
+    }
+
+    if (Array.isArray(content)) {
+      return content
+        .map((item) => {
+          if (typeof item === 'string') {
+            return item;
+          }
+
+          if (item?.type === 'text' && typeof item.text === 'string') {
+            return item.text;
+          }
+
+          return '';
+        })
+        .join(' ')
+        .trim();
+    }
+
+    return '';
+  }
+
+  private extractSseChatCompletionText(payload: string): string {
+    if (!payload.includes('data:')) {
+      return '';
+    }
+
+    let content = '';
+    const lines = payload.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data: ') || trimmed === 'data: [DONE]') {
+        continue;
+      }
+
+      const data = this.tryParseJson(trimmed.slice(6));
+      const delta = data?.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string') {
+        content += delta;
+      }
+    }
+
+    return content.trim();
   }
 
   private parseAction(raw: string): string | null {
@@ -223,6 +508,94 @@ export class AiPlayer {
     return 'call';
   }
 
+  private parseDecisionEnvelope(raw: string): ParsedDecisionEnvelope {
+    const jsonCandidate = this.extractJsonObject(raw);
+    const parsed = jsonCandidate ? this.tryParseJson(jsonCandidate) : this.tryParseJson(raw);
+
+    if (parsed && typeof parsed === 'object') {
+      const actionText = typeof parsed.action === 'string' ? parsed.action.trim() : '';
+      const reasoningText = typeof parsed.reasoning === 'string' ? parsed.reasoning.trim() : '';
+      const speechText = typeof parsed.speech === 'string' ? parsed.speech.trim() : '';
+
+      return {
+        action: this.parseAction(actionText),
+        reasoning: reasoningText,
+        speech: speechText,
+      };
+    }
+
+    return {
+      action: this.parseAction(raw),
+      reasoning: raw.trim(),
+      speech: '...',
+    };
+  }
+
+  private extractJsonObject(raw: string): string {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      return trimmed;
+    }
+
+    const codeFenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (codeFenceMatch?.[1]) {
+      return codeFenceMatch[1].trim();
+    }
+
+    const firstBrace = trimmed.indexOf('{');
+    const lastBrace = trimmed.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return trimmed.slice(firstBrace, lastBrace + 1);
+    }
+
+    return '';
+  }
+
+  private normalizeAction(rawAction: string | null, state: GameState, myId: string): string {
+    const me = state.players.find((player) => player.id === myId);
+    if (!me) {
+      return 'fold';
+    }
+
+    const fallback = this.fallbackAction(state, myId);
+    if (!rawAction) {
+      return fallback;
+    }
+
+    const [kind, amountText] = rawAction.trim().toLowerCase().split(/\s+/, 2);
+    const toCall = Math.max(0, state.currentBet - me.bet);
+    const maxTotalBet = me.bet + me.chips;
+    const minRaiseTo = state.currentBet + 1;
+
+    switch (kind) {
+      case 'fold':
+        return 'fold';
+      case 'check':
+        return toCall === 0 ? 'check' : fallback;
+      case 'call':
+        return toCall > 0 ? 'call' : 'check';
+      case 'raise': {
+        if (maxTotalBet <= state.currentBet) {
+          return fallback;
+        }
+
+        const parsedAmount = Number.parseInt(amountText || '', 10);
+        if (!Number.isFinite(parsedAmount)) {
+          return fallback;
+        }
+
+        const legalAmount = Math.max(minRaiseTo, Math.min(parsedAmount, maxTotalBet));
+        if (legalAmount <= state.currentBet) {
+          return fallback;
+        }
+
+        return `raise ${legalAmount}`;
+      }
+      default:
+        return fallback;
+    }
+  }
+
   private fallbackAction(state: GameState, myId: string): string {
     const me = state.players.find((p) => p.id === myId);
     if (!me) return 'fold';
@@ -233,12 +606,91 @@ export class AiPlayer {
     return 'call';
   }
 
+  private handleActionError(message: string): void {
+    this.logError('错误:', message);
+
+    const state = this.latestState;
+    if (!state) {
+      this.processing = false;
+      this.lastHandledTurnKey = null;
+      return;
+    }
+
+    const me = state.players.find((player) => player.name === this.options.name);
+    if (!me) {
+      this.processing = false;
+      this.lastHandledTurnKey = null;
+      return;
+    }
+
+    const stillMyTurn = state.currentPlayerId === me.id;
+    if (!stillMyTurn) {
+      this.processing = false;
+      this.lastHandledTurnKey = null;
+      return;
+    }
+
+    const recoverableErrors = [
+      '当前有下注，不能过牌',
+      '加注金额必须大于当前下注',
+      '筹码不足',
+    ];
+
+    if (recoverableErrors.some((errorText) => message.includes(errorText))) {
+      const safeAction = this.fallbackAction(state, me.id);
+      this.logInfo(`非法动作已拦截，改用兜底动作: ${safeAction}`);
+      this.processing = false;
+      this.executeAction(safeAction);
+      return;
+    }
+
+    this.processing = false;
+    this.lastHandledTurnKey = null;
+  }
+
+  private buildTurnKey(state: GameState, myId: string): string {
+    const me = state.players.find((player) => player.id === myId);
+    const board = state.communityCards.map((card) => card.display).join(',');
+    const playerBets = state.players
+      .map((player) => `${player.id}:${player.bet}:${player.status}:${player.chips}`)
+      .join('|');
+
+    return [
+      state.phase,
+      state.currentPlayerId ?? 'none',
+      board,
+      state.pot,
+      state.currentBet,
+      me?.bet ?? 0,
+      me?.chips ?? 0,
+      playerBets,
+    ].join('::');
+  }
+
   private executeAction(actionStr: string): void {
     const parts = actionStr.split(' ');
     const action = parts[0] as 'fold' | 'check' | 'call' | 'raise';
     const amount = parts[1] ? parseInt(parts[1], 10) : undefined;
 
     this.client.action(this.options.room, action, amount);
+  }
+
+  private logInfo(message: string): void {
+    if (this.options.quiet) return;
+    console.log(`[AI ${this.options.name}] ${message}`);
+  }
+
+  private logError(message: string, detail?: unknown): void {
+    if (this.options.quiet) {
+      return;
+    }
+
+    if (detail === undefined) {
+      console.error(`[AI ${this.options.name}] ${message}`);
+      return;
+    }
+
+    console.error(`[AI ${this.options.name}] ${message}`, detail);
   }
 
   stop(): void {

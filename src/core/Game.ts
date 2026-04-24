@@ -59,6 +59,7 @@ export class Game {
   private winnerIds?: string[];
   private winAmounts?: Record<string, number>;
   private handResults?: Record<string, string>;
+  private actedPlayerIds: Set<string> = new Set();
 
   constructor() {
     this.deck = new Deck();
@@ -100,6 +101,7 @@ export class Game {
     this.winnerIds = undefined;
     this.winAmounts = undefined;
     this.handResults = undefined;
+    this.actedPlayerIds.clear();
 
     for (const player of this.players) {
       player.resetForNewHand();
@@ -132,14 +134,17 @@ export class Game {
     switch (action) {
       case 'fold':
         player.fold();
+        this.actedPlayerIds.add(player.id);
         break;
       case 'check':
         if (player.bet < this.currentBet) {
           throw new Error('当前有下注，不能过牌');
         }
+        this.actedPlayerIds.add(player.id);
         break;
       case 'call':
         player.call(this.currentBet - player.bet);
+        this.actedPlayerIds.add(player.id);
         break;
       case 'raise':
         if (!amount || amount <= this.currentBet) {
@@ -148,6 +153,8 @@ export class Game {
         const raiseAmount = amount - player.bet;
         player.raise(raiseAmount);
         this.currentBet = amount;
+        this.actedPlayerIds.clear();
+        this.actedPlayerIds.add(player.id);
         break;
     }
 
@@ -173,7 +180,14 @@ export class Game {
     const activePlayers = this.players.filter(p => p.status === PlayerStatus.ACTIVE || p.status === PlayerStatus.ALL_IN);
     if (activePlayers.length <= 1) return true;
 
-    const allActed = activePlayers.every(p => p.bet === this.currentBet || p.status === PlayerStatus.ALL_IN);
+    const allActed = activePlayers.every((player) => {
+      if (player.status === PlayerStatus.ALL_IN) {
+        return true;
+      }
+
+      return this.actedPlayerIds.has(player.id) && player.bet === this.currentBet;
+    });
+
     return allActed;
   }
 
@@ -187,6 +201,7 @@ export class Game {
 
   private advancePhase(): void {
     this.collectBetsToPot();
+    this.actedPlayerIds.clear();
 
     switch (this.phase) {
       case GamePhase.PREFLOP:

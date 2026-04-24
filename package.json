@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test dist/**/*.test.js",
     "server": "node dist/index.js server",
     "client": "node dist/index.js client",
     "slacker": "node dist/index.js slacker",

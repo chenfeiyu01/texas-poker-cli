@@ -37,6 +37,9 @@ class SessionManager {
             recentEvents: [],
         });
     }
+    getHandNumber() {
+        return this.handNumber;
+    }
     startHand(state) {
         this.handNumber += 1;
         this.actionSequence = 0;

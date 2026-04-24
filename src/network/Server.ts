@@ -1,31 +1,46 @@
 import { Server as SocketServer, Socket } from 'socket.io';
-import { createServer } from 'http';
+import { Server as HttpServer, createServer } from 'http';
 import { Game } from '../core/Game';
 import { SessionManager } from '../session/SessionManager';
-import type { PlayerJoinMeta } from '../session/types';
+import { MarkdownSessionLogger } from '../session/MarkdownSessionLogger';
+import type { AiDecisionLog, PlayerJoinMeta } from '../session/types';
 
 interface Room {
   game: Game;
   playerSockets: Map<string, Socket>;
   hostId: string;
   session: SessionManager;
+  logger: MarkdownSessionLogger;
   turnStartedAt: number;
 }
 
 export class PokerServer {
   private io: SocketServer;
+  private httpServer: HttpServer;
   private rooms: Map<string, Room> = new Map();
 
   constructor(port: number = 3000) {
-    const httpServer = createServer();
-    this.io = new SocketServer(httpServer, { cors: { origin: '*' } });
+    this.httpServer = createServer();
+    this.io = new SocketServer(this.httpServer, { cors: { origin: '*' } });
 
     this.io.on('connection', (socket) => {
       this.handleConnection(socket);
     });
 
-    httpServer.listen(port, () => {
+    this.httpServer.listen(port, () => {
       console.log(`🃏 德州扑克服务器运行在端口 ${port}`);
+    });
+  }
+
+  close(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.io.close((ioError) => {
+        if (ioError) {
+          reject(ioError);
+          return;
+        }
+        resolve();
+      });
     });
   }
 
@@ -42,12 +57,15 @@ export class PokerServer {
 
       const session = new SessionManager();
       session.registerPlayer(socket.id, playerName, { ...meta, isGm: meta.isGm ?? true });
+      const logger = new MarkdownSessionLogger(roomId);
+      logger.logRoomCreated(playerName, { ...meta, isGm: meta.isGm ?? true });
 
       const room: Room = {
         game,
         playerSockets: new Map([[socket.id, socket]]),
         hostId: socket.id,
         session,
+        logger,
         turnStartedAt: Date.now(),
       };
       this.rooms.set(roomId, room);
@@ -71,6 +89,7 @@ export class PokerServer {
 
       room.game.addPlayer(socket.id, playerName, 1000, false, meta.isAi ?? false, meta.isGm ?? false);
       room.session.registerPlayer(socket.id, playerName, meta);
+      room.logger.logPlayerJoined(playerName, meta);
       room.playerSockets.set(socket.id, socket);
       socket.join(roomId);
 
@@ -85,6 +104,7 @@ export class PokerServer {
 
       room.game.start();
       room.session.startHand(room.game.getState());
+      room.logger.logHandStart(room.session.getHandNumber(), room.game.getState());
       room.turnStartedAt = Date.now();
       this.broadcastState(roomId);
     });
@@ -109,34 +129,56 @@ export class PokerServer {
             potAfter: room.game.getState(socket.id).pot,
             thinkTimeMs: Math.max(0, Date.now() - room.turnStartedAt),
           });
+          room.logger.logAction({
+            handNumber: room.session.getHandNumber(),
+            playerName: player.name,
+            action,
+            phase: phaseBefore,
+            declaredAmount: amount,
+            totalBet: player.totalBet,
+            potAfter: room.game.getState(socket.id).pot,
+            thinkTimeMs: Math.max(0, Date.now() - room.turnStartedAt),
+          });
+        }
+
+        const afterState = room.game.getState();
+        if (phaseBefore !== afterState.phase) {
+          room.logger.logPhaseTransition(phaseBefore, afterState.phase, afterState);
         }
 
         if (room.game.isEnded()) {
           room.session.finishHand(room.game.getState());
+          room.logger.logHandEnd(room.session.getHandNumber(), room.game.getState());
         } else {
           room.turnStartedAt = Date.now();
         }
 
         this.broadcastState(roomId);
-
-        if (room.game.isEnded()) {
-          setTimeout(() => {
-            if (room.game.isEnded()) {
-              room.game.start();
-              room.session.startHand(room.game.getState());
-              room.turnStartedAt = Date.now();
-              this.broadcastState(roomId);
-            }
-          }, 5000);
-        }
       } catch (err: any) {
         socket.emit('error', err.message);
+      }
+    });
+
+    socket.on('ai-decision-log', (roomId: string, decision: AiDecisionLog) => {
+      const room = this.rooms.get(roomId);
+      if (!room) return;
+
+      const player = room.game.getPlayer(socket.id);
+      if (!player || !player.isAi) return;
+
+      room.logger.logAiDecision(player.name, decision);
+      if (decision.speech?.trim()) {
+        this.io.to(roomId).emit('table-talk', player.name, decision.speech.trim());
       }
     });
 
     socket.on('disconnect', () => {
       for (const [roomId, room] of this.rooms.entries()) {
         if (room.playerSockets.has(socket.id)) {
+          const player = room.game.getPlayer(socket.id);
+          if (player) {
+            room.logger.logPlayerLeft(player.name);
+          }
           room.game.removePlayer(socket.id);
           room.playerSockets.delete(socket.id);
 

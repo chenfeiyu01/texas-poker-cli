@@ -25,6 +25,7 @@ class CliRenderer {
     selectedActionIndex = 0;
     lastActionMarkerSeen = '';
     lastResolvedHandSeen = 0;
+    pendingActionLock = false;
     constructor(client, roomId) {
         this.client = client;
         this.roomId = roomId;
@@ -125,6 +126,7 @@ class CliRenderer {
             tags: true,
         });
         this.client.onState((state) => {
+            this.pendingActionLock = false;
             this.processStateEvents(this.currentState, state);
             this.previousState = this.currentState;
             this.currentState = state;
@@ -135,12 +137,16 @@ class CliRenderer {
             this.log('已连接到牌桌');
         });
         this.client.onError((msg) => {
+            this.pendingActionLock = false;
             this.log('错误: ' + msg);
+        });
+        this.client.onTableTalk((playerName, speech) => {
+            this.log(`${playerName} 说：${speech}`);
         });
         this.actionList.on('select', (_, index) => {
             this.selectedActionIndex = Number(index);
             const action = this.currentActions[this.selectedActionIndex];
-            action?.run();
+            this.runAction(action);
         });
         this.actionList.on('keypress', (_, key) => {
             if (key.name === 'down' || key.name === 'up') {
@@ -163,7 +169,7 @@ class CliRenderer {
         this.screen.key(['enter'], () => {
             if (this.currentActions.length > 0) {
                 const action = this.currentActions[Math.max(0, this.selectedActionIndex)];
-                action?.run();
+                this.runAction(action);
             }
         });
         this.screen.key(['p'], () => {
@@ -171,6 +177,7 @@ class CliRenderer {
         });
         this.screen.key(['s'], () => {
             this.triggerNamedAction('开始游戏');
+            this.triggerNamedAction('开始下一手');
         });
         this.renderActionPanel();
         this.renderPrompt();
@@ -364,9 +371,13 @@ class CliRenderer {
         const toCall = me && state ? Math.max(0, state.currentBet - me.bet) : 0;
         const text = !state
             ? '  正在连接牌桌...'
-            : isMyTurn
-                ? `  轮到你了：请在右下角选择动作。当前需要补 ${toCall}。按 p 可查看玩家简介。`
-                : `  当前轮到 ${currentPlayer?.name ?? '其他玩家'}。看左下角日志可追踪别人刚做了什么。`;
+            : state.phase === 'ended' && me?.isHost
+                ? '  这一手已结算。你是房主，可在右下角选择“开始下一手”。'
+                : state.phase === 'ended'
+                    ? '  这一手已结算。现在可以先看摊牌信息，等待房主开始下一手。'
+                    : isMyTurn
+                        ? `  轮到你了：请在右下角选择动作。当前需要补 ${toCall}。按 p 可查看玩家简介。`
+                        : `  当前轮到 ${currentPlayer?.name ?? '其他玩家'}。看左下角日志可追踪别人刚做了什么。`;
         this.promptBox.setContent(text);
     }
     buildActionOptions() {
@@ -377,13 +388,15 @@ class CliRenderer {
         const isMyTurn = state.currentPlayerId === this.playerId;
         const toCall = Math.max(0, state.currentBet - me.bet);
         const options = [];
-        if (state.phase === 'waiting' && me.isHost) {
+        if ((state.phase === 'waiting' || state.phase === 'ended') && me.isHost) {
             options.push({
-                label: '开始游戏',
-                hint: '房主可以在这里直接开始这一手牌。',
+                label: state.phase === 'ended' ? '开始下一手' : '开始游戏',
+                hint: state.phase === 'ended'
+                    ? '上一手已经结算完毕，由房主决定何时开始下一手。'
+                    : '房主可以在这里直接开始这一手牌。',
                 run: () => {
                     this.client.startGame(this.roomId);
-                    this.log('开始游戏');
+                    this.log(state.phase === 'ended' ? '房主开始了下一手' : '开始游戏');
                 },
             });
         }
@@ -431,7 +444,14 @@ class CliRenderer {
     }
     triggerNamedAction(label) {
         const action = this.currentActions.find((item) => item.label === label);
-        action?.run();
+        this.runAction(action);
+    }
+    runAction(action) {
+        if (!action || this.pendingActionLock) {
+            return;
+        }
+        this.pendingActionLock = true;
+        action.run();
     }
     showRaisePrompt() {
         const state = this.currentState;

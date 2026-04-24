@@ -30,6 +30,7 @@ export class CliRenderer {
   private selectedActionIndex = 0;
   private lastActionMarkerSeen = '';
   private lastResolvedHandSeen = 0;
+  private pendingActionLock = false;
 
   constructor(client: PokerClient, roomId: string) {
     this.client = client;
@@ -141,6 +142,7 @@ export class CliRenderer {
     });
 
     this.client.onState((state) => {
+      this.pendingActionLock = false;
       this.processStateEvents(this.currentState, state);
       this.previousState = this.currentState;
       this.currentState = state;
@@ -153,13 +155,18 @@ export class CliRenderer {
     });
 
     this.client.onError((msg) => {
+      this.pendingActionLock = false;
       this.log('错误: ' + msg);
+    });
+
+    this.client.onTableTalk((playerName, speech) => {
+      this.log(`${playerName} 说：${speech}`);
     });
 
     this.actionList.on('select', (_, index) => {
       this.selectedActionIndex = Number(index);
       const action = this.currentActions[this.selectedActionIndex];
-      action?.run();
+      this.runAction(action);
     });
 
     this.actionList.on('keypress', (_, key) => {
@@ -185,7 +192,7 @@ export class CliRenderer {
     this.screen.key(['enter'], () => {
       if (this.currentActions.length > 0) {
         const action = this.currentActions[Math.max(0, this.selectedActionIndex)];
-        action?.run();
+        this.runAction(action);
       }
     });
     this.screen.key(['p'], () => {
@@ -193,6 +200,7 @@ export class CliRenderer {
     });
     this.screen.key(['s'], () => {
       this.triggerNamedAction('开始游戏');
+      this.triggerNamedAction('开始下一手');
     });
 
     this.renderActionPanel();
@@ -414,6 +422,10 @@ export class CliRenderer {
 
     const text = !state
       ? '  正在连接牌桌...'
+      : state.phase === 'ended' && me?.isHost
+        ? '  这一手已结算。你是房主，可在右下角选择“开始下一手”。'
+      : state.phase === 'ended'
+        ? '  这一手已结算。现在可以先看摊牌信息，等待房主开始下一手。'
       : isMyTurn
         ? `  轮到你了：请在右下角选择动作。当前需要补 ${toCall}。按 p 可查看玩家简介。`
         : `  当前轮到 ${currentPlayer?.name ?? '其他玩家'}。看左下角日志可追踪别人刚做了什么。`;
@@ -430,13 +442,15 @@ export class CliRenderer {
     const toCall = Math.max(0, state.currentBet - me.bet);
     const options: ActionOption[] = [];
 
-    if (state.phase === 'waiting' && me.isHost) {
+    if ((state.phase === 'waiting' || state.phase === 'ended') && me.isHost) {
       options.push({
-        label: '开始游戏',
-        hint: '房主可以在这里直接开始这一手牌。',
+        label: state.phase === 'ended' ? '开始下一手' : '开始游戏',
+        hint: state.phase === 'ended'
+          ? '上一手已经结算完毕，由房主决定何时开始下一手。'
+          : '房主可以在这里直接开始这一手牌。',
         run: () => {
           this.client.startGame(this.roomId);
-          this.log('开始游戏');
+          this.log(state.phase === 'ended' ? '房主开始了下一手' : '开始游戏');
         },
       });
     }
@@ -489,7 +503,16 @@ export class CliRenderer {
 
   private triggerNamedAction(label: string): void {
     const action = this.currentActions.find((item) => item.label === label);
-    action?.run();
+    this.runAction(action);
+  }
+
+  private runAction(action?: ActionOption): void {
+    if (!action || this.pendingActionLock) {
+      return;
+    }
+
+    this.pendingActionLock = true;
+    action.run();
   }
 
   private showRaisePrompt(): void {

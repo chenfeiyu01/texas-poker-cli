@@ -81,11 +81,6 @@ export class GameLauncher {
     const apiBase = process.env.AI_BASE_URL || 'https://api.xbai.top/v1';
     const model = process.env.AI_MODEL || 'gpt-5-nano';
 
-    if (!apiKey) {
-      console.warn('未设置 AI_API_KEY，跳过 AI 自动加入。');
-      return;
-    }
-
     for (let index = 0; index < config.aiCount; index++) {
       const soul = generateSoulProfile(Math.floor(Math.random() * 1_000_000));
       const name = this.buildBotName(soul.archetypeName, index + 1);

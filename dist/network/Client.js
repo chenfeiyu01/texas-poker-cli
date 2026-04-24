@@ -7,7 +7,9 @@ class PokerClient {
     stateListeners = [];
     errorListeners = [];
     connectedListeners = [];
+    tableTalkListeners = [];
     playerId = null;
+    lastState = null;
     connect(url = 'http://localhost:3000') {
         this.socket = (0, socket_io_client_1.io)(url);
         this.socket.on('state', (state) => {
@@ -18,6 +20,7 @@ class PokerClient {
                 }
                 return;
             }
+            this.lastState = state;
             for (const listener of this.stateListeners) {
                 listener(state);
             }
@@ -27,11 +30,17 @@ class PokerClient {
                 listener(msg);
             }
         });
+        this.socket.on('table-talk', (playerName, speech) => {
+            for (const listener of this.tableTalkListeners) {
+                listener(playerName, speech);
+            }
+        });
     }
     disconnect() {
         this.socket?.disconnect();
         this.socket = null;
         this.playerId = null;
+        this.lastState = null;
     }
     createRoom(roomId, playerName, meta = {}) {
         return new Promise((resolve, reject) => {
@@ -75,6 +84,9 @@ class PokerClient {
     action(roomId, action, amount) {
         this.socket?.emit('action', roomId, action, amount);
     }
+    reportAiDecision(roomId, decision) {
+        this.socket?.emit('ai-decision-log', roomId, decision);
+    }
     onState(listener) {
         this.stateListeners.push(listener);
     }
@@ -87,8 +99,14 @@ class PokerClient {
             listener(this.playerId);
         }
     }
+    onTableTalk(listener) {
+        this.tableTalkListeners.push(listener);
+    }
     offState(listener) {
         this.stateListeners = this.stateListeners.filter(l => l !== listener);
+    }
+    getLastState() {
+        return this.lastState;
     }
     isStatePayloadCompatible(state) {
         return Array.isArray(state.communityCards) && state.communityCards.every((card) => {

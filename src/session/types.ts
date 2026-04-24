@@ -69,3 +69,16 @@ export interface SessionView {
   privateMemory?: PrivateMemoryView;
   viewerRole: 'gm' | 'ai' | 'player';
 }
+
+export interface AiDecisionLog {
+  model: string;
+  requestMode: 'chat-completions' | 'responses';
+  durationMs: number;
+  promptSummary: string;
+  reasoningSummary?: string;
+  speech?: string;
+  rawOutput: string;
+  finalAction: string;
+  usedFallback: boolean;
+  errorMessage?: string;
+}

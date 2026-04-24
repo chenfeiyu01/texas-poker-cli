@@ -68,6 +68,10 @@ export class SessionManager {
     });
   }
 
+  getHandNumber(): number {
+    return this.handNumber;
+  }
+
   startHand(state: GameState): void {
     this.handNumber += 1;
     this.actionSequence = 0;

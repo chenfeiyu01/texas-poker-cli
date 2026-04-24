@@ -28,6 +28,7 @@ class Game {
     winnerIds;
     winAmounts;
     handResults;
+    actedPlayerIds = new Set();
     constructor() {
         this.deck = new Deck_1.Deck();
     }
@@ -56,6 +57,7 @@ class Game {
         this.winnerIds = undefined;
         this.winAmounts = undefined;
         this.handResults = undefined;
+        this.actedPlayerIds.clear();
         for (const player of this.players) {
             player.resetForNewHand();
             player.hand = [this.deck.deal(), this.deck.deal()];
@@ -82,14 +84,17 @@ class Game {
         switch (action) {
             case 'fold':
                 player.fold();
+                this.actedPlayerIds.add(player.id);
                 break;
             case 'check':
                 if (player.bet < this.currentBet) {
                     throw new Error('当前有下注，不能过牌');
                 }
+                this.actedPlayerIds.add(player.id);
                 break;
             case 'call':
                 player.call(this.currentBet - player.bet);
+                this.actedPlayerIds.add(player.id);
                 break;
             case 'raise':
                 if (!amount || amount <= this.currentBet) {
@@ -98,6 +103,8 @@ class Game {
                 const raiseAmount = amount - player.bet;
                 player.raise(raiseAmount);
                 this.currentBet = amount;
+                this.actedPlayerIds.clear();
+                this.actedPlayerIds.add(player.id);
                 break;
         }
         this.moveToNextPlayer();
@@ -118,7 +125,12 @@ class Game {
         const activePlayers = this.players.filter(p => p.status === Player_1.PlayerStatus.ACTIVE || p.status === Player_1.PlayerStatus.ALL_IN);
         if (activePlayers.length <= 1)
             return true;
-        const allActed = activePlayers.every(p => p.bet === this.currentBet || p.status === Player_1.PlayerStatus.ALL_IN);
+        const allActed = activePlayers.every((player) => {
+            if (player.status === Player_1.PlayerStatus.ALL_IN) {
+                return true;
+            }
+            return this.actedPlayerIds.has(player.id) && player.bet === this.currentBet;
+        });
         return allActed;
     }
     collectBetsToPot() {
@@ -130,6 +142,7 @@ class Game {
     }
     advancePhase() {
         this.collectBetsToPot();
+        this.actedPlayerIds.clear();
         switch (this.phase) {
             case GamePhase.PREFLOP:
                 this.communityCards.push(this.deck.deal(), this.deck.deal(), this.deck.deal());

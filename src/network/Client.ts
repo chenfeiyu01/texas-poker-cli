@@ -1,12 +1,15 @@
 import { io, Socket } from 'socket.io-client';
 import { GameState } from '../core/Game';
-import type { PlayerJoinMeta } from '../session/types';
+import type { AiDecisionLog, PlayerJoinMeta } from '../session/types';
 
 export class PokerClient {
   private socket: Socket | null = null;
   private stateListeners: ((state: GameState) => void)[] = [];
   private errorListeners: ((msg: string) => void)[] = [];
   private connectedListeners: ((playerId: string) => void)[] = [];
+  private tableTalkListeners: ((playerName: string, speech: string) => void)[] = [];
+  private playerId: string | null = null;
+  private lastState: GameState | null = null;
 
   connect(url: string = 'http://localhost:3000'): void {
     this.socket = io(url);
@@ -20,6 +23,7 @@ export class PokerClient {
         return;
       }
 
+      this.lastState = state;
       for (const listener of this.stateListeners) {
         listener(state);
       }
@@ -30,11 +34,19 @@ export class PokerClient {
         listener(msg);
       }
     });
+
+    this.socket.on('table-talk', (playerName: string, speech: string) => {
+      for (const listener of this.tableTalkListeners) {
+        listener(playerName, speech);
+      }
+    });
   }
 
   disconnect(): void {
     this.socket?.disconnect();
     this.socket = null;
+    this.playerId = null;
+    this.lastState = null;
   }
 
   createRoom(roomId: string, playerName: string, meta: PlayerJoinMeta = {}): Promise<string> {
@@ -45,6 +57,7 @@ export class PokerClient {
       }
       this.socket.emit('create-room', roomId, playerName, meta, (res: any) => {
         if (res.success) {
+          this.playerId = res.playerId;
           this.connectedListeners.forEach(l => l(res.playerId));
           resolve(res.playerId);
         } else {
@@ -62,6 +75,7 @@ export class PokerClient {
       }
       this.socket.emit('join-room', roomId, playerName, meta, (res: any) => {
         if (res.success) {
+          this.playerId = res.playerId;
           this.connectedListeners.forEach(l => l(res.playerId));
           resolve(res.playerId);
         } else {
@@ -79,6 +93,10 @@ export class PokerClient {
     this.socket?.emit('action', roomId, action, amount);
   }
 
+  reportAiDecision(roomId: string, decision: AiDecisionLog): void {
+    this.socket?.emit('ai-decision-log', roomId, decision);
+  }
+
   onState(listener: (state: GameState) => void): void {
     this.stateListeners.push(listener);
   }
@@ -89,10 +107,21 @@ export class PokerClient {
 
   onConnected(listener: (playerId: string) => void): void {
     this.connectedListeners.push(listener);
+    if (this.playerId) {
+      listener(this.playerId);
+    }
+  }
+
+  onTableTalk(listener: (playerName: string, speech: string) => void): void {
+    this.tableTalkListeners.push(listener);
   }
 
   offState(listener: (state: GameState) => void): void {
     this.stateListeners = this.stateListeners.filter(l => l !== listener);
+  }
+
+  getLastState(): GameState | null {
+    return this.lastState;
   }
 
   private isStatePayloadCompatible(state: GameState): boolean {
