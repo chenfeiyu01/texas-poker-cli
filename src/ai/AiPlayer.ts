@@ -7,7 +7,7 @@ export interface AiPlayerOptions {
   host: string;
   room: string;
   name: string;
-  apiKey: string;
+  apiKey?: string;
   apiBase: string;
   model: string;
   thinkMs?: number;
@@ -96,14 +96,27 @@ export class AiPlayer {
 
   private async decideAction(state: GameState, myId: string): Promise<string | null> {
     const prompt = buildPokerPrompt(state, myId, this.options.soul);
+    const apiKey = this.options.apiKey?.trim();
+
+    if (!apiKey) {
+      return this.fallbackAction(state, myId);
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
 
     try {
+      if (this.shouldUseChatCompletions()) {
+        return this.requestViaChatCompletions(prompt, apiKey, state, myId, controller.signal);
+      }
+
       const response = await fetch(`${this.options.apiBase}/responses`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.options.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
+        signal: controller.signal,
         body: JSON.stringify({
           model: this.options.model,
           input: prompt,
@@ -111,6 +124,18 @@ export class AiPlayer {
           max_output_tokens: 20,
         }),
       });
+
+      if (response.ok) {
+        const data = await response.json();
+        const raw = data.output_text?.trim() || data.choices?.[0]?.message?.content?.trim() || '';
+        if (raw) {
+          return this.parseAction(raw);
+        }
+      }
+
+      if (response.status === 404 || response.status === 400) {
+        return this.requestViaChatCompletions(prompt, apiKey, state, myId, controller.signal);
+      }
 
       if (!response.ok) {
         const text = await response.text();
@@ -120,12 +145,63 @@ export class AiPlayer {
         return this.fallbackAction(state, myId);
       }
 
-      const data = await response.json();
-      const raw = data.output_text?.trim() || data.choices?.[0]?.message?.content?.trim() || '';
-      return this.parseAction(raw);
+      return this.fallbackAction(state, myId);
     } catch (err) {
       if (!this.options.quiet) {
         console.error(`[AI ${this.options.name}] 请求失败:`, err);
+      }
+      return this.fallbackAction(state, myId);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private shouldUseChatCompletions(): boolean {
+    return this.options.apiBase.includes('xbai.top');
+  }
+
+  private async requestViaChatCompletions(
+    prompt: string,
+    apiKey: string,
+    state: GameState,
+    myId: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    try {
+      const response = await fetch(`${this.options.apiBase}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal,
+        body: JSON.stringify({
+          model: this.options.model,
+          messages: [
+            {
+              role: 'user',
+              content: prompt,
+            },
+          ],
+          temperature: 0.3,
+          max_tokens: 32,
+        }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        if (!this.options.quiet) {
+          console.error(`[AI ${this.options.name}] Chat API 错误:`, response.status, text);
+        }
+        return this.fallbackAction(state, myId);
+      }
+
+      const data = await response.json();
+      const raw = data.choices?.[0]?.message?.content?.trim() || '';
+      return raw ? this.parseAction(raw) ?? this.fallbackAction(state, myId) : this.fallbackAction(state, myId);
+    } catch (err) {
+      if (!this.options.quiet) {
+        console.error(`[AI ${this.options.name}] Chat 请求失败:`, err);
       }
       return this.fallbackAction(state, myId);
     }
