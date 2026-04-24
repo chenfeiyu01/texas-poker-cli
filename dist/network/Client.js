@@ -7,6 +7,7 @@ class PokerClient {
     stateListeners = [];
     errorListeners = [];
     connectedListeners = [];
+    playerId = null;
     connect(url = 'http://localhost:3000') {
         this.socket = (0, socket_io_client_1.io)(url);
         this.socket.on('state', (state) => {
@@ -30,6 +31,7 @@ class PokerClient {
     disconnect() {
         this.socket?.disconnect();
         this.socket = null;
+        this.playerId = null;
     }
     createRoom(roomId, playerName, meta = {}) {
         return new Promise((resolve, reject) => {
@@ -39,6 +41,7 @@ class PokerClient {
             }
             this.socket.emit('create-room', roomId, playerName, meta, (res) => {
                 if (res.success) {
+                    this.playerId = res.playerId;
                     this.connectedListeners.forEach(l => l(res.playerId));
                     resolve(res.playerId);
                 }
@@ -56,6 +59,7 @@ class PokerClient {
             }
             this.socket.emit('join-room', roomId, playerName, meta, (res) => {
                 if (res.success) {
+                    this.playerId = res.playerId;
                     this.connectedListeners.forEach(l => l(res.playerId));
                     resolve(res.playerId);
                 }
@@ -79,6 +83,9 @@ class PokerClient {
     }
     onConnected(listener) {
         this.connectedListeners.push(listener);
+        if (this.playerId) {
+            listener(this.playerId);
+        }
     }
     offState(listener) {
         this.stateListeners = this.stateListeners.filter(l => l !== listener);

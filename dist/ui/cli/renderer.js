@@ -19,9 +19,12 @@ class CliRenderer {
     roomId;
     playerId = null;
     currentState = null;
+    previousState = null;
     logs = [];
     currentActions = [];
     selectedActionIndex = 0;
+    lastActionMarkerSeen = '';
+    lastResolvedHandSeen = 0;
     constructor(client, roomId) {
         this.client = client;
         this.roomId = roomId;
@@ -122,6 +125,8 @@ class CliRenderer {
             tags: true,
         });
         this.client.onState((state) => {
+            this.processStateEvents(this.currentState, state);
+            this.previousState = this.currentState;
             this.currentState = state;
             this.render();
         });
@@ -182,6 +187,71 @@ class CliRenderer {
         this.renderActionPanel();
         this.renderPrompt();
         this.screen.render();
+    }
+    processStateEvents(previous, current) {
+        this.logRecentActions(current);
+        this.logPhaseTransition(previous, current);
+        this.logShowdown(current);
+    }
+    logRecentActions(state) {
+        const actions = state.session?.recentActions ?? [];
+        const unseenActions = actions.filter((action) => this.buildActionMarker(action.handNumber, action.sequence) > this.lastActionMarkerSeen);
+        for (const action of unseenActions) {
+            const actionText = this.describeAction(action.action, action.declaredAmount);
+            const thinkText = action.thinkTimeMs > 0 ? `，思考 ${Math.round(action.thinkTimeMs / 100) / 10}s` : '';
+            this.log(`${action.playerName} ${actionText}${thinkText}`);
+            this.lastActionMarkerSeen = this.buildActionMarker(action.handNumber, action.sequence);
+        }
+    }
+    logPhaseTransition(previous, current) {
+        if (!previous) {
+            return;
+        }
+        if (previous.phase !== current.phase) {
+            const phaseName = this.getPhaseName(current.phase);
+            if (current.phase === 'flop') {
+                this.log(`翻牌：${current.communityCards.map((card) => card.display).join(' ')}`);
+            }
+            else if (current.phase === 'turn') {
+                const turnCard = current.communityCards[current.communityCards.length - 1];
+                this.log(`转牌：${turnCard?.display ?? '未知'}`);
+            }
+            else if (current.phase === 'river') {
+                const riverCard = current.communityCards[current.communityCards.length - 1];
+                this.log(`河牌：${riverCard?.display ?? '未知'}`);
+            }
+            else if (current.phase === 'preflop') {
+                this.log('新一手开始，底牌已发出');
+            }
+            else {
+                this.log(`阶段切换：${phaseName}`);
+            }
+        }
+        if (previous.currentPlayerId !== current.currentPlayerId && current.currentPlayerId) {
+            const currentPlayer = current.players.find((player) => player.id === current.currentPlayerId);
+            if (currentPlayer?.id === this.playerId) {
+                this.log('轮到你行动了');
+            }
+        }
+    }
+    logShowdown(state) {
+        const handNumber = state.session?.handNumber ?? 0;
+        if (state.phase !== 'ended' || !state.winnerIds || handNumber <= this.lastResolvedHandSeen) {
+            return;
+        }
+        const winners = state.winnerIds
+            .map((winnerId) => state.players.find((player) => player.id === winnerId)?.name ?? winnerId)
+            .join('、');
+        this.log(`本手结束：${winners} 赢下底池`);
+        if (state.handResults) {
+            for (const player of state.players) {
+                const result = state.handResults[player.id];
+                if (result) {
+                    this.log(`${player.name} 的牌型：${result}`);
+                }
+            }
+        }
+        this.lastResolvedHandSeen = handNumber;
     }
     renderTable(state) {
         const lines = [];
@@ -251,6 +321,7 @@ class CliRenderer {
                 : '  等待其他玩家行动',
             '',
             `  小盲 / 大盲：${state.smallBlind} / ${state.bigBlind}`,
+            `  已开公共牌：${state.communityCards.length}/5`,
         ];
         this.statusBox.setContent(lines.join('\n'));
     }
@@ -295,7 +366,7 @@ class CliRenderer {
             ? '  正在连接牌桌...'
             : isMyTurn
                 ? `  轮到你了：请在右下角选择动作。当前需要补 ${toCall}。按 p 可查看玩家简介。`
-                : `  当前轮到 ${currentPlayer?.name ?? '其他玩家'}。你的手牌在右上角，按 p 可查看玩家简介。`;
+                : `  当前轮到 ${currentPlayer?.name ?? '其他玩家'}。看左下角日志可追踪别人刚做了什么。`;
         this.promptBox.setContent(text);
     }
     buildActionOptions() {
@@ -480,9 +551,11 @@ class CliRenderer {
         return map[status] || status;
     }
     renderCard(card) {
-        const isRed = card.includes('♥') || card.includes('♦');
-        const color = isRed ? 'red-fg' : 'white-fg';
-        return `{${color}}[ ${card} ]{/${color}}`;
+        const rank = card.slice(0, -1);
+        const suit = card.slice(-1);
+        const isRed = suit === '♥' || suit === '♦';
+        const color = isRed ? 'red-fg' : 'cyan-fg';
+        return `{bold}[ ${rank} {${color}}${suit}{/${color}} ]{/bold}`;
     }
     isGmProfile(profile) {
         return 'privateSummary' in profile;
@@ -493,6 +566,32 @@ class CliRenderer {
             this.logs.shift();
         this.logBox.setContent(this.logs.join('\n'));
         this.logBox.setScrollPerc(100);
+    }
+    describeAction(action, amount) {
+        if (action === 'fold')
+            return '弃牌';
+        if (action === 'check')
+            return '过牌';
+        if (action === 'call')
+            return '跟注';
+        if (action === 'raise')
+            return `加注到 ${amount ?? '?'}`;
+        return action;
+    }
+    getPhaseName(phase) {
+        const map = {
+            waiting: '等待中',
+            preflop: '翻牌前',
+            flop: '翻牌圈',
+            turn: '转牌圈',
+            river: '河牌圈',
+            showdown: '摊牌',
+            ended: '结算中',
+        };
+        return map[phase] || phase;
+    }
+    buildActionMarker(handNumber, sequence) {
+        return `${String(handNumber).padStart(6, '0')}-${String(sequence).padStart(6, '0')}`;
     }
 }
 exports.CliRenderer = CliRenderer;
