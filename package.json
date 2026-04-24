@@ -1,0 +1,43 @@
+{
+  "name": "texas-poker-cli",
+  "version": "1.0.0",
+  "description": "联机德州扑克 CLI 游戏 - 含正常模式与摸鱼模式",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "server": "node dist/index.js server",
+    "client": "node dist/index.js client",
+    "slacker": "node dist/index.js slacker",
+    "play": "node dist/index.js play",
+    "play:slacker": "node dist/index.js play --slacker",
+    "ai": "node dist/index.js ai",
+    "ai:2": "node dist/index.js ai --count 2",
+    "dev": "npm run build && npm run play",
+    "dev:slacker": "npm run build && npm run play:slacker"
+  },
+  "keywords": [
+    "poker",
+    "texas-holdem",
+    "cli",
+    "game"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "commander": "^12.0.0",
+    "concurrently": "^9.2.1",
+    "dotenv": "^17.4.2",
+    "socket.io": "^4.7.5",
+    "socket.io-client": "^4.7.5",
+    "uuid": "^9.0.1",
+    "wait-on": "^9.0.5"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^20.12.0",
+    "@types/uuid": "^9.0.8",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}
